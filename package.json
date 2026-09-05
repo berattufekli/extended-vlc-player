@@ -37,7 +37,7 @@
     "lint": "expo-module lint",
     "test": "jest",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "expo-module build && expo-module clean --target build"
+    "prepublishOnly": "tsc --noEmit"
   },
   "files": [
     "build",
