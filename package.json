@@ -1,6 +1,6 @@
 {
   "name": "extended-vlc-player",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "React Native video player built on MobileVLCKit (iOS) and libVLC (Android) with true iOS Picture-in-Picture via AVSampleBufferDisplayLayer bridge.",
   "license": "MIT",
   "main": "build/index.js",
@@ -51,7 +51,6 @@
   ],
   "peerDependencies": {
     "expo": "*",
-    "expo-modules-core": "*",
     "react": "*",
     "react-native": "*"
   },
