@@ -1,0 +1,25 @@
+# Build artifacts
+build/
+node_modules/
+.expo/
+dist/
+*.tsbuildinfo
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test artifacts
+coverage/
+
+# Local dev overrides
+.env
+.env.local

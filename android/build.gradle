@@ -1,0 +1,36 @@
+// Top-level build file for the `extended-vlc-player` local Expo Module.
+buildscript {
+  repositories {
+    google()
+    mavenCentral()
+  }
+  dependencies {
+    classpath 'com.android.tools.build:gradle'
+    classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin'
+  }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'expo.modules.extendedvlcplayer'
+version = '0.1.0'
+
+android {
+  namespace 'expo.modules.extendedvlcplayer'
+  defaultConfig {
+    minSdkVersion (findProperty('expo.minSdkVersion') ?: 26).toInteger()
+    targetSdkVersion (findProperty('expo.targetSdkVersion') ?: 34).toInteger()
+  }
+  // The libVLC .so files ship native code for four ABIs. The Expo app
+  // already filters to its own ABIs in android/app/build.gradle; the host
+  // app's split configuration wins, so we don't repeat abiFilters here.
+  buildFeatures {
+    buildConfig true
+  }
+}
+
+dependencies {
+  implementation 'org.videolan.android:libvlc:3.6.0'
+}

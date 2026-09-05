@@ -1,0 +1,65 @@
+{
+  "name": "extended-vlc-player",
+  "version": "0.1.0",
+  "description": "React Native video player built on MobileVLCKit (iOS) and libVLC (Android) with true iOS Picture-in-Picture via AVSampleBufferDisplayLayer bridge.",
+  "license": "MIT",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "author": {
+    "name": "Berat Tüfekli",
+    "email": "berattufekli@gmail.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/berattufekli/extended-vlc-player.git"
+  },
+  "bugs": {
+    "url": "https://github.com/berattufekli/extended-vlc-player/issues"
+  },
+  "homepage": "https://github.com/berattufekli/extended-vlc-player#readme",
+  "keywords": [
+    "react-native",
+    "expo",
+    "video",
+    "player",
+    "vlc",
+    "mobilevlckit",
+    "mkv",
+    "matroska",
+    "picture-in-picture",
+    "pip",
+    "iptv",
+    "expo-module"
+  ],
+  "scripts": {
+    "build": "expo-module build",
+    "clean": "expo-module clean",
+    "lint": "expo-module lint",
+    "test": "jest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "expo-module build && expo-module clean --target build"
+  },
+  "files": [
+    "build",
+    "ios",
+    "android",
+    "src",
+    "app.plugin.js",
+    "expo-module.config.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "expo": "*",
+    "expo-modules-core": "*",
+    "react": "*",
+    "react-native": "*"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.14",
+    "expo": "^57.0.0",
+    "expo-module-scripts": "^56.0.3",
+    "expo-modules-core": "~57.0.2",
+    "typescript": "~6.0.3"
+  }
+}
