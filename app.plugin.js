@@ -53,7 +53,7 @@ function withIosPods(config, options) {
       tag: PODFILE_TAG,
       src: newSrc,
       newSrc: `\n  # extended-vlc-player: configure MobileVLCKit static link + de-dupe libc++\n  installer.pods_project.targets.each do |target|\n    if target.name == 'MobileVLCKit'\n      target.build_configurations.each do |config|\n        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '16.4'\n      end\n    end\n  end\n`,
-      anchor: /^post_install do \|installer\|$/m,
+      anchor: /^\s*post_install do \|installer\|$/m,
       offset: 1,
       comment: '#',
     }).contents;
