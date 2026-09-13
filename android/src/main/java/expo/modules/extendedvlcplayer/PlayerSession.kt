@@ -106,6 +106,7 @@ class PlayerSession(
     val media = Media(libVlc, Uri.parse(uri))
     currentMedia = media
     mediaPlayer.media = media
+    mediaPlayer.play()
   }
 
   private fun durationSeconds(): Double = mediaPlayer.getLength() / 1000.0
@@ -165,6 +166,10 @@ class PlayerSession(
   }
 
   fun release() {
+    val vout = mediaPlayer.getVLCVout()
+    if (vout.areViewsAttached()) {
+      vout.detachViews()
+    }
     mediaPlayer.stop()
     currentMedia?.release()
     libVlc.release()

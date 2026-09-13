@@ -7,7 +7,7 @@ Under the hood:
 | Platform | Engine                              | Default version | Min OS    |
 | -------- | ----------------------------------- | --------------- | --------- |
 | iOS      | [MobileVLCKit](https://code.videolan.org/videolan/VLCKit) | `~3.7.3`        | iOS 16.4+ |
-| Android  | [libVLC](https://code.videolan.org/videolan/vlc-android)  | `3.6.0`         | API 26+   |
+| Android  | [libVLC](https://code.videolan.org/videolan/vlc-android)  | `3.7.5`         | API 26+   |
 
 The JS surface intentionally mirrors `expo-video` so an existing `<VideoView>` consumer (e.g. `BackgroundVideoPlayer.jsx`) can be migrated with a one-line import swap.
 
@@ -185,7 +185,7 @@ Then in `app.json`:
 "plugins": [
   ["extended-vlc-player", {
     "ios":     { "mobileVlcKitVersion": "3.7.3" },
-    "android": { "libVlcVersion": "3.6.0" }
+    "android": { "libVlcVersion": "3.7.5" }
   }]
 ]
 ```
@@ -200,7 +200,7 @@ The plugin (`app.plugin.js`) does the following, idempotently:
 
 - **iOS Podfile** — adds `pod 'MobileVLCKit', '~> 3.7.3'` and a `post_install` hook that pins `IPHONEOS_DEPLOYMENT_TARGET = 16.4` on the MobileVLCKit target.
 - **iOS Info.plist** — adds `"audio"` to `UIBackgroundModes` so the audio session is eligible for background playback and PiP.
-- **Android `android/app/build.gradle`** — adds `implementation "org.videolan.android:libvlc:3.6.0"`. ABI filters are inherited from the host app.
+- **Android `android/app/build.gradle`** — adds `implementation "org.videolan.android:libvlc-all:3.7.5"`. ABI filters are inherited from the host app.
 - **Android `AndroidManifest.xml`** — adds `android:supportsPictureInPicture="true"` and the `configChanges` set to `MainActivity`.
 
 To publish to npm, run `npm publish` from the module root. To consume from a local checkout, `file:` works during development and you should switch to the registry version before shipping (see [Troubleshooting](#troubleshooting)).
@@ -341,8 +341,9 @@ All options are optional. Defaults match what the plugin is pinned to in CI.
       enableBitcode: false,
     },
     android: {
-      // org.videolan.android:libvlc version.
-      libVlcVersion: '3.6.0',
+      // org.videolan.android:libvlc-all version. 3.7.5 ships 16 KB-aligned
+      // arm64 native binaries required by Android 15+ 16 KB devices.
+      libVlcVersion: '3.7.5',
     },
     pip: {
       // Reserved for the snapshot bridge. The current bridge runs at the

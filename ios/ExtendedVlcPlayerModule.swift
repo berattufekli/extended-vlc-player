@@ -19,6 +19,14 @@ public final class ExtendedVlcPlayerModule: Module {
       AudioSessionConfigurator.configureForPlayback()
     }
 
+    Function("createPlayer") { () -> Int in
+      PlayerRegistry.shared.next().0
+    }
+
+    Function("destroyPlayer") { (instanceId: Int) in
+      PlayerRegistry.shared.remove(id: instanceId)
+    }
+
     AsyncFunction("isPictureInPictureSupported") { () -> Bool in
       AVPictureInPictureController.isPictureInPictureSupported()
     }

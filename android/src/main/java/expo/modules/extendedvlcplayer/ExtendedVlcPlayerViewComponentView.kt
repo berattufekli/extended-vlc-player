@@ -1,7 +1,6 @@
 package expo.modules.extendedvlcplayer
 
 import android.content.Context
-import android.view.View
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.viewevent.EventDispatcher
 import expo.modules.kotlin.views.ExpoView
@@ -17,6 +16,7 @@ class ExtendedVlcPlayerViewComponentView(context: Context, appContext: AppContex
   ExpoView(context, appContext) {
 
   private var playerId: Int = 0
+  private var contentFit: String = "contain"
 
   val onLoad by EventDispatcher<Map<String, Any>>()
   val onProgress by EventDispatcher<Map<String, Any>>()
@@ -29,11 +29,23 @@ class ExtendedVlcPlayerViewComponentView(context: Context, appContext: AppContex
   val onPictureInPictureStop by EventDispatcher<Unit>()
 
   fun setPlayer(id: Int) {
-    if (playerId == id) return
-    // If we were attached to a previous session, detach.
+    if (playerId == id) {
+      attachToSession()
+      return
+    }
     detachFromSession()
     playerId = id
-    val session = PlayerRegistry.session(id) ?: return
+    attachToSession()
+  }
+
+  fun setContentFit(value: String) {
+    contentFit = value
+  }
+
+  private fun attachToSession() {
+    if (playerId == 0) return
+    val session = PlayerRegistry.session(playerId) ?: return
+    if (session.drawable.parent === this) return
     val drawable = session.drawable
     drawable.layoutParams = android.view.ViewGroup.LayoutParams(
       android.view.ViewGroup.LayoutParams.MATCH_PARENT,
@@ -53,12 +65,6 @@ class ExtendedVlcPlayerViewComponentView(context: Context, appContext: AppContex
     session.onPictureInPictureStop = { onPictureInPictureStop(Unit) }
   }
 
-  fun createPlayer(): Int {
-    val (id, _) = PlayerRegistry.create(context)
-    playerId = id
-    return id
-  }
-
   private fun detachFromSession() {
     if (playerId == 0) return
     val session = PlayerRegistry.session(playerId) ?: return
@@ -76,7 +82,12 @@ class ExtendedVlcPlayerViewComponentView(context: Context, appContext: AppContex
   }
 
   override fun onDetachedFromWindow() {
-    super.onDetachedFromWindow()
     detachFromSession()
+    super.onDetachedFromWindow()
+  }
+
+  override fun onAttachedToWindow() {
+    super.onAttachedToWindow()
+    attachToSession()
   }
 }

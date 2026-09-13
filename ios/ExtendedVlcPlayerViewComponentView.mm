@@ -33,6 +33,19 @@ RCT_EXPORT_VIEW_PROPERTY(onBuffering, RCTBubblingEventBlock)
 RCT_EXPORT_VIEW_PROPERTY(onPictureInPictureStart, RCTBubblingEventBlock)
 RCT_EXPORT_VIEW_PROPERTY(onPictureInPictureStop, RCTBubblingEventBlock)
 
+- (void)setPlayer:(NSNumber *)player
+{
+  NSNumber *nextId = player ?: @0;
+  if (self.playerId != nil && [self.playerId isEqualToNumber:nextId]) {
+    [self attachSessionIfPossible];
+    return;
+  }
+
+  [self detachSession];
+  self.playerId = nextId;
+  [self attachSessionIfPossible];
+}
+
 + (ComponentDescriptorProvider)componentDescriptorProvider
 {
   return [RCTViewComponentView new];
@@ -49,23 +62,47 @@ RCT_EXPORT_VIEW_PROPERTY(onPictureInPictureStop, RCTBubblingEventBlock)
 - (void)didMoveToWindow
 {
   [super didMoveToWindow];
-  if (self.window != nil && self.playerId == nil) {
-    NSNumber *newId = [EXVLCPlayerRegistryBridge createSession];
-    self.playerId = newId;
-    NSValue *boxed = [EXVLCPlayerRegistryBridge sessionForId:newId];
-    PlayerSession *session = (PlayerSession *)[boxed nonretainedObjectValue];
-    if (session != nil) {
-      session.drawable.frame = self.contentView.bounds;
-      session.drawable.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-      [self.contentView addSubview:session.drawable];
-      [EXVLCPlayerRegistryBridge attachEventSinks:newId view:self];
-    }
+  [self attachSessionIfPossible];
+}
+
+- (void)attachSessionIfPossible
+{
+  if (self.window == nil || self.playerId == nil || self.playerId.intValue == 0) {
+    return;
   }
+
+  NSValue *boxed = [EXVLCPlayerRegistryBridge sessionForId:self.playerId];
+  PlayerSession *session = (PlayerSession *)[boxed nonretainedObjectValue];
+  if (session == nil) {
+    return;
+  }
+
+  if (session.drawable.superview != self.contentView) {
+    session.drawable.frame = self.contentView.bounds;
+    session.drawable.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.contentView addSubview:session.drawable];
+  }
+  [EXVLCPlayerRegistryBridge attachEventSinks:self.playerId view:self];
+}
+
+- (void)detachSession
+{
+  if (self.playerId == nil || self.playerId.intValue == 0) {
+    return;
+  }
+
+  NSValue *boxed = [EXVLCPlayerRegistryBridge sessionForId:self.playerId];
+  PlayerSession *session = (PlayerSession *)[boxed nonretainedObjectValue];
+  if (session != nil && session.drawable.superview == self.contentView) {
+    [session.drawable removeFromSuperview];
+  }
+  [EXVLCPlayerRegistryBridge detachEventSinks:self.playerId];
 }
 
 - (void)dealloc
 {
-  if (self.playerId != nil) {
+  [self detachSession];
+  if (self.playerId != nil && self.playerId.intValue != 0) {
     [EXVLCPlayerRegistryBridge destroySession:self.playerId];
   }
 }

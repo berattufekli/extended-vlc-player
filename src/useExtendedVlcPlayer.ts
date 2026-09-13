@@ -1,12 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { requireNativeModule } from 'expo-modules-core';
 
-import type {
-  ExtendedVlcLoadEvent,
-  ExtendedVlcPlayer,
-  ExtendedVlcProgressEvent,
-  ExtendedVlcSource,
-} from './types';
+import type { ExtendedVlcPlayer, ExtendedVlcSource } from './types';
 
 // Native module is registered by the platform-specific module under the
 // JS module name "ExtendedVlcPlayer". The requireNativeModule helper resolves
@@ -50,8 +45,8 @@ export interface UseExtendedVlcPlayerOptions {
 
 /**
  * Returns a stable player object for the given source. The native player
- * is created once (lazy on first method call) and replaced in place when
- * `source` changes via the same `replace` API used by `expo-video`.
+ * is created once on mount and replaced in place when `source` changes via
+ * the same `replace` API used by `expo-video`.
  */
 export function useExtendedVlcPlayer(
   source: ExtendedVlcSource,
@@ -76,18 +71,40 @@ export function useExtendedVlcPlayer(
   }, []);
 
   useEffect(() => {
+    let createdId = 0;
+    try {
+      createdId = getModule().createPlayer();
+      setNativeId(createdId);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.warn('[extended-vlc-player] player creation failed:', error);
+    }
+
+    return () => {
+      if (createdId <= 0) return;
+      try {
+        getModule().destroyPlayer(createdId);
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.warn('[extended-vlc-player] player cleanup failed:', error);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     // When the source prop changes, ask the native module to swap in place
     // instead of remounting the view (which would reset audio session, PiP
     // delegate wiring, etc.).
+    if (nativeId <= 0) return;
     try {
-      getModule().replace(normalized);
+      getModule().replace(nativeId, normalized);
     } catch (error) {
       // Surface as console error; the player view will also emit onError
       // once the Fabric event dispatcher picks it up.
       // eslint-disable-next-line no-console
       console.warn('[extended-vlc-player] replace failed:', error);
     }
-  }, [normalized]);
+  }, [nativeId, normalized]);
 
   // The player object is intentionally stable across renders. Methods are
   // closures over `nativeId` so the latest normalized source is always
@@ -107,12 +124,7 @@ export function useExtendedVlcPlayer(
       replace: (next: ExtendedVlcSource) => {
         const nextNormalized = normalizeSource(next);
         try {
-          getModule().replace({
-            ...nextNormalized,
-            // Tag the replace with the current nativeId so the existing
-            // instance is updated rather than a new one allocated.
-            instanceId: nativeId,
-          });
+          getModule().replace(nativeId, nextNormalized);
         } catch (error) {
           // eslint-disable-next-line no-console
           console.warn('[extended-vlc-player] replace failed:', error);
@@ -140,21 +152,9 @@ export function useExtendedVlcPlayer(
     }
   }, [player, options]);
 
-  // Bump the native id once on mount so the first source prop is committed
-  // to the native side. We use a ref-based "first" instead of an effect to
-  // avoid an extra render.
-  const firstRef = useRef(true);
-  useEffect(() => {
-    if (firstRef.current) {
-      firstRef.current = false;
-      setNativeId(1);
-    }
-  }, []);
-
-  // Mark unused variables to keep TypeScript happy with strict checks.
-  void useCallback;
+  // Keep the ref in the hook for consumers that unmount while a native call
+  // is in flight; the native registry owns the actual session lifetime.
   void isMountedRef;
-  void (undefined as ExtendedVlcLoadEvent | ExtendedVlcProgressEvent | undefined);
 
   return player;
 }

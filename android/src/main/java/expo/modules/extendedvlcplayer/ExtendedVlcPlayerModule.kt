@@ -2,12 +2,11 @@ package expo.modules.extendedvlcplayer
 
 import android.app.Activity
 import android.app.PictureInPictureParams
-import android.content.Context
-import android.content.res.Configuration
 import android.os.Build
 import android.util.Rational
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import expo.modules.kotlin.records.Record
 
 /**
  * TurboModule for `extended-vlc-player` on Android.
@@ -21,6 +20,37 @@ import expo.modules.kotlin.modules.ModuleDefinition
 class ExtendedVlcPlayerModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("ExtendedVlcPlayer")
+
+    Function("createPlayer") {
+      val context = appContext.reactContext
+        ?: throw IllegalStateException("React context is not available")
+      PlayerRegistry.create(context).first
+    }
+
+    Function("destroyPlayer") { instanceId: Int ->
+      PlayerRegistry.destroy(instanceId)
+    }
+
+    View(ExtendedVlcPlayerViewComponentView::class) {
+      Name("ExtendedVlcPlayerView")
+      Events(
+        "onLoad",
+        "onProgress",
+        "onPlaying",
+        "onPaused",
+        "onEnded",
+        "onError",
+        "onBuffering",
+        "onPictureInPictureStart",
+        "onPictureInPictureStop"
+      )
+      Prop("player") { view: ExtendedVlcPlayerViewComponentView, id: Int ->
+        view.setPlayer(id)
+      }
+      Prop("contentFit") { view: ExtendedVlcPlayerViewComponentView, fit: String ->
+        view.setContentFit(fit)
+      }
+    }
 
     AsyncFunction("isPictureInPictureSupported") {
       Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
@@ -96,4 +126,4 @@ class ExtendedVlcPlayerModule : Module() {
 class ReplacePayload(
   val uri: String,
   val instanceId: Int = 0
-)
+) : Record

@@ -22,7 +22,7 @@
  * Plugin options (all optional):
  *   {
  *     ios:     { mobileVlcKitVersion: '3.7.3', enableBitcode: false },
- *     android: { libVlcVersion: '3.6.0' },
+ *     android: { libVlcVersion: '3.7.5' },
  *     pip:     { snapshotFps: 30, snapshotQuality: 'medium' },
  *   }
  */
@@ -83,7 +83,7 @@ const GRADLE_TAG = 'extended-vlc-player-gradle';
 const GRADLE_VLC = (vlcVersion) => `  implementation "org.videolan.android:libvlc-all:${vlcVersion}"`;
 
 function withAndroidGradle(config, options) {
-  const vlcVersion = (options?.android?.libVlcVersion || '3.6.0').toString();
+  const vlcVersion = (options?.android?.libVlcVersion || '3.7.5').toString();
   return withAppBuildGradle(config, (gradleConfig) => {
     if (gradleConfig.modResults.language !== 'groovy') {
       // The main app module is Groovy in this Expo template (verified in
@@ -93,15 +93,30 @@ function withAndroidGradle(config, options) {
         '[extended-vlc-player] Android build.gradle is not Groovy. Update the plugin to handle the new DSL.'
       );
     }
-    const newSrc = mergeContents({
+
+    const currentContents = gradleConfig.modResults.contents;
+    const existingBlock = new RegExp(
+      `(// @generated begin ${GRADLE_TAG}\\b[\\s\\S]*?implementation\\s+[\"']org\\.videolan\\.android:libvlc(?:-all)?:)([^\"']+)([\"'])`,
+      'm'
+    );
+    const updatedContents = currentContents.replace(
+      existingBlock,
+      (_match, prefix, _previousVersion, closingQuote) => `${prefix}${vlcVersion}${closingQuote}`
+    );
+
+    if (updatedContents !== currentContents) {
+      gradleConfig.modResults.contents = updatedContents;
+      return gradleConfig;
+    }
+
+    gradleConfig.modResults.contents = mergeContents({
       tag: GRADLE_TAG,
-      src: gradleConfig.modResults.contents,
+      src: currentContents,
       newSrc: `\n${INFOPLIST_AUDIO_SESSION}\ndependencies {\n${GRADLE_VLC(vlcVersion)}\n}\n`,
       anchor: /^android\s*\{/m,
       offset: 1,
       comment: '//',
     }).contents;
-    gradleConfig.modResults.contents = newSrc;
     return gradleConfig;
   });
 }

@@ -56,6 +56,19 @@ final class PlayerRegistryBridge: NSObject {
       (view as? ExtendedVlcPlayerViewEventReceiver)?.exvlcEmit("onPictureInPictureStop", [:])
     }
   }
+
+  @objc static func detachEventSinks(_ id: NSNumber) {
+    guard let session = PlayerRegistry.shared.session(for: id.intValue) else { return }
+    session.onLoad = nil
+    session.onProgress = nil
+    session.onPlaying = nil
+    session.onPaused = nil
+    session.onEnded = nil
+    session.onError = nil
+    session.onBuffering = nil
+    session.onPictureInPictureStart = nil
+    session.onPictureInPictureStop = nil
+  }
 }
 
 /// Implemented by the Fabric component view (in Obj-C++) so that the
