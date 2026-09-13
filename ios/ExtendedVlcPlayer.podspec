@@ -24,6 +24,8 @@ Pod::Spec.new do |s|
   s.source_files = '**/*.{h,m,mm,swift}'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
+    'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',
+    'CLANG_CXX_LIBRARY' => 'libc++',
     'SWIFT_OBJC_INTERFACE_HEADER_NAME' => 'ExtendedVlcPlayer-Swift.h',
     'OTHER_SWIFT_FLAGS' => '$(inherited) -D COCOAPODS -Xfrontend -module-name -Xfrontend ExtendedVlcPlayer',
     # The host app's Podfile already enables use_frameworks! :linkage => :static
