@@ -24,7 +24,7 @@ class ExtendedVlcPlayerModule : Module() {
 
     AsyncFunction("isPictureInPictureSupported") {
       Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-        appContext.activity?.application?.packageManager?.hasSystemFeature(
+        appContext.currentActivity?.application?.packageManager?.hasSystemFeature(
           android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE
         ) == true
     }
@@ -76,7 +76,7 @@ class ExtendedVlcPlayerModule : Module() {
     }
 
     AsyncFunction("startPictureInPicture") { instanceId: Int ->
-      val activity = appContext.activity ?: return@AsyncFunction false
+      val activity = appContext.currentActivity ?: return@AsyncFunction false
       val session = PlayerRegistry.session(instanceId) ?: return@AsyncFunction false
       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return@AsyncFunction false
       val params = PictureInPictureParams.Builder()

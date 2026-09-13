@@ -49,9 +49,10 @@ class PlayerSession(
   init {
     surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
       override fun surfaceCreated(holder: SurfaceHolder) {
-        mediaPlayer.vout.setVideoSurface(holder.surface, surfaceView.holder)
+        val vout = mediaPlayer.getVLCVout()
+        vout.setVideoView(surfaceView)
         if (!isAttached) {
-          mediaPlayer.attachViews(arrayOf<Any>(surfaceView).toJavaArray())
+          vout.attachViews()
           isAttached = true
         }
         mediaPlayer.play()
@@ -60,36 +61,40 @@ class PlayerSession(
       override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
 
       override fun surfaceDestroyed(holder: SurfaceHolder) {
-        mediaPlayer.vout.setVideoSurface(null, null)
+        val vout = mediaPlayer.getVLCVout()
+        if (vout.areViewsAttached()) {
+          vout.detachViews()
+        }
+        isAttached = false
       }
     })
 
     mediaPlayer.setEventListener { event ->
       when (event.type) {
-        MediaPlayer.Event.Playing -> onPlaying?.invoke(mapOf("duration" to (event.durationMs / 1000.0)))
+        MediaPlayer.Event.Playing -> onPlaying?.invoke(mapOf("duration" to durationSeconds()))
         MediaPlayer.Event.Paused -> onPaused?.invoke(emptyMap())
         MediaPlayer.Event.Stopped -> onEnded?.invoke()
         MediaPlayer.Event.EndReached -> onEnded?.invoke()
         MediaPlayer.Event.EncounteredError -> onError?.invoke(
           mapOf(
-            "message" to (event.escapedVlcError ?: "libVLC error"),
+            "message" to "libVLC error",
             "code" to "VLC_ERROR",
             "domain" to "libVLC"
           )
         )
-        MediaPlayer.Event.Buffering -> onBuffering?.invoke(mapOf("isBuffering" to event.buffering.toDouble() < 100.0))
+        MediaPlayer.Event.Buffering -> onBuffering?.invoke(mapOf("isBuffering" to (event.getBuffering() < 100.0f)))
         MediaPlayer.Event.Opening -> onLoad?.invoke(
           mapOf(
-            "duration" to (event.durationMs / 1000.0),
+            "duration" to durationSeconds(),
             "audioTracks" to emptyList<Map<String, Any>>(),
             "textTracks" to emptyList<Map<String, Any>>()
           )
         )
         MediaPlayer.Event.TimeChanged -> onProgress?.invoke(
           mapOf(
-            "currentTime" to (event.timeChanged / 1000.0),
-            "duration" to (event.durationMs / 1000.0),
-            "position" to (if (event.durationMs > 0) event.timeChanged.toDouble() / event.durationMs else 0.0)
+            "currentTime" to (event.getTimeChanged() / 1000.0),
+            "duration" to durationSeconds(),
+            "position" to (if (mediaPlayer.getLength() > 0) event.getTimeChanged().toDouble() / mediaPlayer.getLength() else 0.0)
           )
         )
       }
@@ -102,6 +107,8 @@ class PlayerSession(
     currentMedia = media
     mediaPlayer.media = media
   }
+
+  private fun durationSeconds(): Double = mediaPlayer.getLength() / 1000.0
 
   fun play() = mediaPlayer.play()
   fun pause() = mediaPlayer.pause()
@@ -163,6 +170,3 @@ class PlayerSession(
     libVlc.release()
   }
 }
-
-// Helper to convert Kotlin Array to Java Array (libVLC's attachViews is Java).
-private inline fun <reified T> Array<out T>.toJavaArray(): Array<T> = this as Array<T>

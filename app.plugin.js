@@ -65,7 +65,7 @@ function withIosPods(config, options) {
 // ---- iOS Info.plist -------------------------------------------------------
 
 const INFOPLIST_TAG = 'extended-vlc-player-info-plist';
-const INFOPLIST_AUDIO_SESSION = '# extended-vlc-player: keep audio session active for PiP and background playback';
+const INFOPLIST_AUDIO_SESSION = '// extended-vlc-player: keep audio session active for PiP and background playback';
 
 function withIosInfoPlist(config) {
   return withInfoPlist(config, (infoPlist) => {
@@ -80,7 +80,7 @@ function withIosInfoPlist(config) {
 // ---- Android build.gradle ------------------------------------------------
 
 const GRADLE_TAG = 'extended-vlc-player-gradle';
-const GRADLE_VLC = (vlcVersion) => `  implementation "org.videolan.android:libvlc:${vlcVersion}"`;
+const GRADLE_VLC = (vlcVersion) => `  implementation "org.videolan.android:libvlc-all:${vlcVersion}"`;
 
 function withAndroidGradle(config, options) {
   const vlcVersion = (options?.android?.libVlcVersion || '3.6.0').toString();
