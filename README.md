@@ -171,12 +171,10 @@ return <VideoView player={expoVideoPlayer} style={{ flex: 1 }} />;
 
 ## Install
 
-In the host app's `package.json`:
+In the host app, install the published package:
 
-```json
-"dependencies": {
-  "extended-vlc-player": "file:../extended-vlc-player"
-}
+```bash
+npm install extended-vlc-player@0.1.6
 ```
 
 Then in `app.json`:
@@ -203,7 +201,7 @@ The plugin (`app.plugin.js`) does the following, idempotently:
 - **Android `android/app/build.gradle`** — adds `implementation "org.videolan.android:libvlc-all:3.7.5"`. ABI filters are inherited from the host app.
 - **Android `AndroidManifest.xml`** — adds `android:supportsPictureInPicture="true"` and the `configChanges` set to `MainActivity`.
 
-To publish to npm, run `npm publish` from the module root. To consume from a local checkout, `file:` works during development and you should switch to the registry version before shipping (see [Troubleshooting](#troubleshooting)).
+To publish a new version, run `npm publish` from the module root. For local package development, a `file:` dependency still works, but production apps should consume the registry version.
 
 ---
 

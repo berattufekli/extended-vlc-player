@@ -53,6 +53,11 @@ final class PlayerSession: NSObject {
   private var displayLink: CADisplayLink?
   private var snapshotCounter: UInt64 = 0
   private var contentFit = "contain"
+  private var durationSecondsCache = 0.0
+  private var durationPollTimer: Timer?
+  private var durationPollAttempts = 0
+  private var didEmitDurationLoad = false
+  private var pendingSeekSeconds: Double?
 
   /// Closure-based event sinks. The Fabric component view sets these when
   /// the session is attached; the session calls them on player events.
@@ -74,6 +79,7 @@ final class PlayerSession: NSObject {
 
   deinit {
     displayLink?.invalidate()
+    durationPollTimer?.invalidate()
     mediaPlayer.stop()
   }
 
@@ -84,8 +90,18 @@ final class PlayerSession: NSObject {
   func stop() { mediaPlayer.stop() }
 
   func seek(to seconds: Double) {
-    let vt = max(0, seconds)
-    mediaPlayer.time = VLCTime(int: Int32(vt * 1000))
+    let target = max(0, seconds.isFinite ? seconds : 0)
+    guard Thread.isMainThread else {
+      DispatchQueue.main.async { [weak self] in
+        self?.seek(to: target)
+      }
+      return
+    }
+
+    // libVLC can ignore a time assignment while it is still opening the
+    // media. Retain the request and apply it from the first playable state.
+    pendingSeekSeconds = target
+    applyPendingSeekIfReady()
   }
 
   func setRate(_ rate: Double) {
@@ -147,8 +163,73 @@ final class PlayerSession: NSObject {
   }
 
   func replace(media: VLCMedia) {
+    durationPollTimer?.invalidate()
+    durationPollTimer = nil
+    durationPollAttempts = 0
+    durationSecondsCache = 0
+    didEmitDurationLoad = false
+    pendingSeekSeconds = nil
     mediaPlayer.media = media
     mediaPlayer.play()
+  }
+
+  private func readDurationSeconds() -> Double {
+    let duration = Double(mediaPlayer.media?.length.intValue ?? 0) / 1000.0
+    return duration > 0 ? duration : durationSecondsCache
+  }
+
+  private func applyPendingSeekIfReady() {
+    guard let target = pendingSeekSeconds, mediaPlayer.media != nil else { return }
+    guard mediaPlayer.state != .opening else { return }
+
+    mediaPlayer.time = VLCTime(int: Int32(target * 1000))
+    pendingSeekSeconds = nil
+  }
+
+  private func emitDurationLoadIfReady() {
+    guard durationSecondsCache > 0, !didEmitDurationLoad else { return }
+    didEmitDurationLoad = true
+    onLoad?([
+      "duration": durationSecondsCache,
+      "audioTracks": audioTracksPayload(),
+      "textTracks": textTracksPayload(),
+    ])
+  }
+
+  private func emitProgress() {
+    let current = Double(mediaPlayer.time.intValue) / 1000.0
+    let total = durationSecondsCache
+    let position = total > 0 ? current / total : 0
+    onProgress?([
+      "currentTime": current,
+      "duration": total,
+      "position": position,
+    ])
+  }
+
+  private func scheduleDurationPolling() {
+    guard durationSecondsCache <= 0, durationPollTimer == nil else { return }
+    durationPollAttempts = 0
+    durationPollTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
+      guard let self else {
+        timer.invalidate()
+        return
+      }
+
+      self.durationPollAttempts += 1
+      let duration = self.readDurationSeconds()
+      if duration > 0 {
+        self.durationSecondsCache = duration
+        self.applyPendingSeekIfReady()
+        self.emitDurationLoadIfReady()
+        self.emitProgress()
+        timer.invalidate()
+        self.durationPollTimer = nil
+      } else if self.durationPollAttempts >= 40 {
+        timer.invalidate()
+        self.durationPollTimer = nil
+      }
+    }
   }
 
   // MARK: - Picture-in-Picture
@@ -248,7 +329,11 @@ final class PlayerSession: NSObject {
 
 extension PlayerSession: VLCMediaPlayerDelegate {
   func mediaPlayerStateChanged(_ aNotification: Notification) {
-    let duration = Double(mediaPlayer.media?.length.intValue ?? 0) / 1000.0
+    let duration = readDurationSeconds()
+    if duration > 0 {
+      durationSecondsCache = duration
+    }
+
     switch mediaPlayer.state {
     case .opening:
       onLoad?([
@@ -256,9 +341,18 @@ extension PlayerSession: VLCMediaPlayerDelegate {
         "audioTracks": audioTracksPayload(),
         "textTracks": textTracksPayload(),
       ])
+      if duration <= 0 { scheduleDurationPolling() }
     case .playing:
+      applyPendingSeekIfReady()
+      emitDurationLoadIfReady()
       onPlaying?(["duration": duration])
+      if duration > 0 {
+        emitProgress()
+      } else {
+        scheduleDurationPolling()
+      }
     case .paused:
+      applyPendingSeekIfReady()
       onPaused?([:])
     case .stopped:
       onEnded?()
@@ -283,7 +377,16 @@ extension PlayerSession: VLCMediaPlayerDelegate {
 
   func mediaPlayerTimeChanged(_ aNotification: Notification) {
     let current = Double(mediaPlayer.time.intValue) / 1000.0
-    let total = Double(mediaPlayer.media?.length.intValue ?? 0) / 1000.0
+    let detectedDuration = readDurationSeconds()
+    if detectedDuration > 0 {
+      durationSecondsCache = detectedDuration
+      emitDurationLoadIfReady()
+    } else {
+      scheduleDurationPolling()
+    }
+
+    applyPendingSeekIfReady()
+    let total = durationSecondsCache
     let position = total > 0 ? current / total : 0
     onProgress?([
       "currentTime": current,

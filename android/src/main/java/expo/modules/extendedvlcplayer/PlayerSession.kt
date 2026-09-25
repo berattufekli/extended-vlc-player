@@ -7,6 +7,8 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.util.Rational
 import android.view.SurfaceHolder
@@ -54,6 +56,31 @@ class PlayerSession(
   private var isAttached = false
   private var isInPiP = false
   private var contentFit = "contain"
+  private val mainHandler = Handler(Looper.getMainLooper())
+  private var durationSecondsCache = 0.0
+  private var durationPollAttempts = 0
+  private var pendingSeekSeconds: Double? = null
+  private var didEmitDurationLoad = false
+  private val durationPollRunnable = object : Runnable {
+    override fun run() {
+      val duration = readDurationSeconds()
+      if (duration > 0) {
+        durationSecondsCache = duration
+        applyPendingSeekIfReady()
+        emitDurationLoadIfReady()
+        emitProgress()
+        durationPollAttempts = 0
+        return
+      }
+
+      durationPollAttempts += 1
+      if (durationPollAttempts < 40) {
+        mainHandler.postDelayed(this, 250L)
+      } else {
+        durationPollAttempts = 0
+      }
+    }
+  }
 
   init {
     surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
@@ -81,7 +108,11 @@ class PlayerSession(
             TAG,
             "event Playing id=$id length=${mediaPlayer.getLength()} videoTracks=${mediaPlayer.getVideoTracksCount()} audioTracks=${mediaPlayer.getAudioTracksCount()}"
           )
-          onPlaying?.invoke(mapOf("duration" to durationSeconds()))
+          durationSecondsCache = readDurationSeconds()
+          applyPendingSeekIfReady()
+          emitDurationLoadIfReady()
+          onPlaying?.invoke(mapOf("duration" to durationSecondsCache))
+          if (durationSecondsCache > 0) emitProgress() else scheduleDurationPolling()
         }
         MediaPlayer.Event.Paused -> onPaused?.invoke(emptyMap())
         MediaPlayer.Event.Stopped -> onEnded?.invoke()
@@ -101,19 +132,24 @@ class PlayerSession(
           Log.i(TAG, "event Opening id=$id")
           onLoad?.invoke(
             mapOf(
-              "duration" to durationSeconds(),
+              "duration" to readDurationSeconds(),
               "audioTracks" to emptyList<Map<String, Any>>(),
               "textTracks" to emptyList<Map<String, Any>>()
             )
           )
+          scheduleDurationPolling()
         }
-        MediaPlayer.Event.TimeChanged -> onProgress?.invoke(
-          mapOf(
-            "currentTime" to (event.getTimeChanged() / 1000.0),
-            "duration" to durationSeconds(),
-            "position" to (if (mediaPlayer.getLength() > 0) event.getTimeChanged().toDouble() / mediaPlayer.getLength() else 0.0)
-          )
-        )
+        MediaPlayer.Event.TimeChanged -> {
+          val duration = readDurationSeconds()
+          if (duration > 0) {
+            durationSecondsCache = duration
+            emitDurationLoadIfReady()
+          } else {
+            scheduleDurationPolling()
+          }
+          applyPendingSeekIfReady()
+          emitProgress()
+        }
       }
     }
   }
@@ -129,6 +165,11 @@ class PlayerSession(
     media.addOption(":live-caching=3000")
     media.addOption(":http-reconnect=true")
     currentMedia = media
+    mainHandler.removeCallbacks(durationPollRunnable)
+    durationSecondsCache = 0.0
+    durationPollAttempts = 0
+    pendingSeekSeconds = null
+    didEmitDurationLoad = false
     mediaPlayer.media = media
     mediaPlayer.play()
   }
@@ -181,14 +222,56 @@ class PlayerSession(
     updateVideoLayout(surfaceView.width, surfaceView.height)
   }
 
-  private fun durationSeconds(): Double = mediaPlayer.getLength() / 1000.0
+  private fun readDurationSeconds(): Double {
+    val duration = mediaPlayer.getLength() / 1000.0
+    return if (duration > 0) duration else durationSecondsCache
+  }
+
+  private fun emitDurationLoadIfReady() {
+    if (durationSecondsCache <= 0 || didEmitDurationLoad) return
+    didEmitDurationLoad = true
+    onLoad?.invoke(
+      mapOf(
+        "duration" to durationSecondsCache,
+        "audioTracks" to emptyList<Map<String, Any>>(),
+        "textTracks" to emptyList<Map<String, Any>>()
+      )
+    )
+  }
+
+  private fun emitProgress() {
+    val current = mediaPlayer.time / 1000.0
+    val total = durationSecondsCache
+    onProgress?.invoke(
+      mapOf(
+        "currentTime" to current,
+        "duration" to total,
+        "position" to (if (total > 0) current / total else 0.0)
+      )
+    )
+  }
+
+  private fun scheduleDurationPolling() {
+    if (durationSecondsCache > 0 || durationPollAttempts > 0) return
+    durationPollAttempts = 0
+    mainHandler.post(durationPollRunnable)
+  }
+
+  private fun applyPendingSeekIfReady() {
+    val target = pendingSeekSeconds ?: return
+    if (mediaPlayer.getLength() <= 0 && !mediaPlayer.isPlaying) return
+    mediaPlayer.time = (target * 1000).toLong()
+    pendingSeekSeconds = null
+  }
 
   fun play() = mediaPlayer.play()
   fun pause() = mediaPlayer.pause()
   fun stop() = mediaPlayer.stop()
 
   fun seekTo(seconds: Double) {
-    mediaPlayer.time = (seconds * 1000).toLong()
+    val target = seconds.coerceAtLeast(0.0)
+    pendingSeekSeconds = target
+    applyPendingSeekIfReady()
   }
 
   fun setRate(rate: Float) {
@@ -238,6 +321,7 @@ class PlayerSession(
   }
 
   fun release() {
+    mainHandler.removeCallbacks(durationPollRunnable)
     val vout = mediaPlayer.getVLCVout()
     if (vout.areViewsAttached()) {
       vout.detachViews()

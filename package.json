@@ -1,6 +1,6 @@
 {
   "name": "extended-vlc-player",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "React Native video player built on MobileVLCKit (iOS) and libVLC (Android) with true iOS Picture-in-Picture via AVSampleBufferDisplayLayer bridge.",
   "license": "MIT",
   "main": "build/index.js",
@@ -11,7 +11,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/berattufekli/extended-vlc-player.git"
+    "url": "git+https://github.com/berattufekli/extended-vlc-player.git"
   },
   "bugs": {
     "url": "https://github.com/berattufekli/extended-vlc-player/issues"
