@@ -1,7 +1,7 @@
 import ExpoModulesCore
 import UIKit
 
-/// Expo 57/Fabric view that owns the drawable UIView for one VLC session.
+/// Expo 57/Fabric view that shows the video surface of one VLC session.
 ///
 /// The session itself is deliberately kept outside the view so replacing a
 /// source, rotating the device, or temporarily detaching the React view does
@@ -10,8 +10,10 @@ public final class ExtendedVlcPlayerView: ExpoView {
   private var playerId = 0
   private var contentFit = "contain"
   private var aspectRatio: String?
+  private var startsPictureInPictureAutomatically = false
 
   let onLoad = EventDispatcher()
+  let onTracksChanged = EventDispatcher()
   let onProgress = EventDispatcher()
   let onPlaying = EventDispatcher()
   let onPaused = EventDispatcher()
@@ -23,15 +25,11 @@ public final class ExtendedVlcPlayerView: ExpoView {
 
   public required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
-    configureView()
-  }
-
-  private func configureView() {
     backgroundColor = .black
     clipsToBounds = true
   }
 
-  public func setPlayer(_ id: Int) {
+  func setPlayer(_ id: Int) {
     guard playerId != id else {
       attachSessionIfPossible()
       return
@@ -42,14 +40,19 @@ public final class ExtendedVlcPlayerView: ExpoView {
     attachSessionIfPossible()
   }
 
-  public func setContentFit(_ value: String) {
+  func setContentFit(_ value: String) {
     contentFit = value
     PlayerRegistry.shared.session(for: playerId)?.setContentFit(value)
   }
 
-  public func setAspectRatio(_ value: String?) {
+  func setAspectRatio(_ value: String?) {
     aspectRatio = value
     PlayerRegistry.shared.session(for: playerId)?.setAspectRatio(value)
+  }
+
+  func setStartsPictureInPictureAutomatically(_ value: Bool) {
+    startsPictureInPictureAutomatically = value
+    PlayerRegistry.shared.session(for: playerId)?.startsPictureInPictureAutomatically = value
   }
 
   public override func didMoveToWindow() {
@@ -63,25 +66,28 @@ public final class ExtendedVlcPlayerView: ExpoView {
 
   public override func layoutSubviews() {
     super.layoutSubviews()
-    guard let session = PlayerRegistry.shared.session(for: playerId) else { return }
-    session.drawable.frame = bounds
-    session.setContentFit(contentFit)
-    session.setAspectRatio(aspectRatio)
+    guard let session = PlayerRegistry.shared.session(for: playerId),
+          session.surface.superview === self else { return }
+    session.surface.frame = bounds
   }
 
   private func attachSessionIfPossible() {
     guard playerId != 0, window != nil,
           let session = PlayerRegistry.shared.session(for: playerId) else { return }
 
-    let drawable = session.drawable
-    if drawable.superview !== self {
-      drawable.frame = bounds
-      drawable.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-      addSubview(drawable)
+    let surface = session.surface
+    if surface.superview !== self {
+      surface.frame = bounds
+      surface.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      addSubview(surface)
     }
     session.setContentFit(contentFit)
+    session.setAspectRatio(aspectRatio)
+    session.startsPictureInPictureAutomatically = startsPictureInPictureAutomatically
+    session.preparePictureInPicture()
 
     session.onLoad = { [weak self] payload in self?.onLoad(payload) }
+    session.onTracksChanged = { [weak self] payload in self?.onTracksChanged(payload) }
     session.onProgress = { [weak self] payload in self?.onProgress(payload) }
     session.onPlaying = { [weak self] payload in self?.onPlaying(payload) }
     session.onPaused = { [weak self] payload in self?.onPaused(payload) }
@@ -96,18 +102,14 @@ public final class ExtendedVlcPlayerView: ExpoView {
     guard playerId != 0, let session = PlayerRegistry.shared.session(for: playerId) else {
       return
     }
-
-    if session.drawable.superview === self {
-      session.drawable.removeFromSuperview()
+    // The PiP window renders from the session's layer; keep it in the
+    // hierarchy while PiP is showing so the window does not go blank.
+    if session.isPictureInPictureActive() {
+      return
     }
-    session.onLoad = nil
-    session.onProgress = nil
-    session.onPlaying = nil
-    session.onPaused = nil
-    session.onEnded = nil
-    session.onError = nil
-    session.onBuffering = nil
-    session.onPictureInPictureStart = nil
-    session.onPictureInPictureStop = nil
+    if session.surface.superview === self {
+      session.surface.removeFromSuperview()
+    }
+    session.clearEventSinks()
   }
 }

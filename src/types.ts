@@ -22,19 +22,25 @@ export type ExtendedVlcSource =
 
 /** Audio / subtitle track entry exposed by VLC after a source loads. */
 export interface ExtendedVlcTrack {
+  /** Position in the track list with libVLC's "Disable" entry removed. */
   index: number;
   /** Localised label, e.g. "English", "Türkçe 5.1". */
   label?: string;
-  /** RFC 5646 language code when VLC exposes one. */
+  /** Language code as reported by libVLC (ISO 639-1/2), when known. */
   language?: string;
   /** Codec identifier reported by libVLC (e.g. "mp4a", "ac3", "subrip"). */
   codec?: string;
+  /** True for the track libVLC is currently playing. */
+  selected?: boolean;
 }
 
-export interface ExtendedVlcLoadEvent {
-  duration: number;       // seconds
+export interface ExtendedVlcTracksEvent {
   audioTracks: ExtendedVlcTrack[];
   textTracks: ExtendedVlcTrack[];
+}
+
+export interface ExtendedVlcLoadEvent extends ExtendedVlcTracksEvent {
+  duration: number;       // seconds
 }
 
 export interface ExtendedVlcProgressEvent {
@@ -59,9 +65,14 @@ export interface ExtendedVlcPlayerViewProps {
   contentFit?: ContentFit;
   /** Forces VLC's output geometry when the source reports an unreliable ratio. */
   aspectRatio?: '16:9' | '4:3' | string;
+  /** iOS: enter PiP automatically when the app moves to the background. */
+  startsPictureInPictureAutomatically?: boolean;
   onLoad?: (e: ExtendedVlcLoadEvent) => void;
+  /** Fired whenever the available tracks or the selected track change. */
+  onTracksChanged?: (e: ExtendedVlcTracksEvent) => void;
   onProgress?: (e: ExtendedVlcProgressEvent) => void;
   onPlaying?: (e: { duration: number }) => void;
+  /** `target` is the playback position in seconds when playback paused. */
   onPaused?: (e: { target: number }) => void;
   onEnded?: () => void;
   onError?: (e: ExtendedVlcErrorEvent) => void;

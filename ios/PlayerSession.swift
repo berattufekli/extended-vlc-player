@@ -1,13 +1,21 @@
 import AVFoundation
 import AVKit
+import CoreMedia
 import Foundation
 import MobileVLCKit
 import UIKit
 
-/// Owns the runtime state of a single VLC media player plus the
-/// PiP-related infrastructure. There is one instance per JS player.
+/// Owns the runtime state of a single VLC media player plus its
+/// Picture-in-Picture controller. There is one instance per JS player.
 ///
-/// Thread-safety: all UIKit/VLC work happens on the main thread.
+/// Video never goes through MobileVLCKit's OpenGL drawable. `EXVLCFrameSink`
+/// hands every decoded frame to `displayLayer`, an `AVSampleBufferDisplayLayer`
+/// that renders inline and doubles as the PiP content source, so PiP keeps
+/// receiving frames while the app is in the background.
+///
+/// Thread-safety: all state except the frame path is touched on the main
+/// thread. Frames arrive on libVLC's video output thread and only touch
+/// `displayLayer` and `frameFormat`.
 final class PlayerSession: NSObject {
   let id: Int
   let mediaPlayer = VLCMediaPlayer(options: [
@@ -16,52 +24,40 @@ final class PlayerSession: NSObject {
     "--file-caching=1500",
   ] as [Any])
 
-  /// The UIView that hosts the `VLCMediaPlayer.drawable`. Created on demand
-  /// so a session that is only used for headless PiP does not allocate a
-  /// drawable. The Fabric component view owns and retains it.
-  lazy var drawable: UIView = {
-    let view = UIView()
-    view.backgroundColor = .black
-    view.translatesAutoresizingMaskIntoConstraints = false
-    mediaPlayer.drawable = view
-    return view
-  }()
+  let displayLayer = AVSampleBufferDisplayLayer()
+  private lazy var frameSink = EXVLCFrameSink(mediaPlayer: mediaPlayer)
+  private var frameFormat: CMVideoFormatDescription?
 
-  /// Off-screen layer that backs the PiP overlay.
-  private lazy var sampleBufferDisplayLayer: AVSampleBufferDisplayLayer = {
-    let layer = AVSampleBufferDisplayLayer()
-    layer.videoGravity = .resizeAspect
-    layer.backgroundColor = UIColor.black.cgColor
-    return layer
-  }()
+  /// Drives the PiP window's scrubber. Frames are flagged "display
+  /// immediately", so the timebase never delays rendering.
+  private let timebase: CMTimebase
 
-  private lazy var pipBridge: PipBridge = PipBridge(displayLayer: sampleBufferDisplayLayer)
-  private var _pipController: AVPictureInPictureController?
-  private var pipController: AVPictureInPictureController? {
-    get { _pipController }
-    set {
-      _pipController?.removeObserver(self, forKeyPath: "pictureInPictureActive", context: nil)
-      _pipController = newValue
-      _pipController?.addObserver(self, forKeyPath: "pictureInPictureActive", options: [.new], context: nil)
+  /// Created on the main thread when a view first shows the session.
+  private(set) lazy var surface: PlayerSurfaceView = PlayerSurfaceView(displayLayer: displayLayer)
+
+  private var pipController: AVPictureInPictureController?
+  private var pipObservations: [NSKeyValueObservation] = []
+  private var pipStartWaiters: [(Bool) -> Void] = []
+  var startsPictureInPictureAutomatically = false {
+    didSet {
+      pipController?.canStartPictureInPictureAutomaticallyFromInline = startsPictureInPictureAutomatically
     }
   }
 
-  private lazy var pipSampleBufferDelegate: SampleBufferPlaybackDelegate = {
-    SampleBufferPlaybackDelegate(session: self)
-  }()
-
-  private var displayLink: CADisplayLink?
-  private var snapshotCounter: UInt64 = 0
-  private var contentFit = "contain"
-  private var durationSecondsCache = 0.0
-  private var durationPollTimer: Timer?
-  private var durationPollAttempts = 0
-  private var didEmitDurationLoad = false
+  private var durationSeconds = 0.0
+  private var didEmitLoad = false
+  private var didEmitLoadWithDuration = false
   private var pendingSeekSeconds: Double?
+  private var isBuffering = false
+  private var lastProgressEmit: CFTimeInterval = 0
+  private var lastTracksSignature = ""
+  private var lastTracksCheck: CFTimeInterval = 0
+  private var isDestroyed = false
 
-  /// Closure-based event sinks. The Fabric component view sets these when
-  /// the session is attached; the session calls them on player events.
+  /// Closure-based event sinks. The view sets these while it shows the
+  /// session; the session calls them on the main thread.
   var onLoad: (([String: Any]) -> Void)?
+  var onTracksChanged: (([String: Any]) -> Void)?
   var onProgress: (([String: Any]) -> Void)?
   var onPlaying: (([String: Any]) -> Void)?
   var onPaused: (([String: Any]) -> Void)?
@@ -73,255 +69,398 @@ final class PlayerSession: NSObject {
 
   init(id: Int) {
     self.id = id
+    var timebase: CMTimebase?
+    CMTimebaseCreateWithSourceClock(
+      allocator: kCFAllocatorDefault,
+      sourceClock: CMClockGetHostTimeClock(),
+      timebaseOut: &timebase
+    )
+    self.timebase = timebase!
+    CMTimebaseSetRate(self.timebase, rate: 0)
+    CMTimebaseSetTime(self.timebase, time: .zero)
     super.init()
+
+    displayLayer.videoGravity = .resizeAspect
+    displayLayer.backgroundColor = UIColor.black.cgColor
+    displayLayer.controlTimebase = self.timebase
+
     mediaPlayer.delegate = self
+    frameSink.onFrame = { [weak self] pixelBuffer in
+      self?.enqueue(pixelBuffer)
+    }
   }
 
   deinit {
-    displayLink?.invalidate()
-    durationPollTimer?.invalidate()
+    frameSink.invalidate()
+    mediaPlayer.delegate = nil
     mediaPlayer.stop()
+  }
+
+  /// Tears the session down; called when JS releases the player.
+  func destroy() {
+    isDestroyed = true
+    frameSink.invalidate()
+    clearEventSinks()
+    resolvePictureInPictureWaiters(false)
+    pipObservations.removeAll()
+    pipController?.stopPictureInPicture()
+    pipController?.delegate = nil
+    pipController = nil
+    mediaPlayer.delegate = nil
+    mediaPlayer.stop()
+    surface.removeFromSuperview()
+  }
+
+  func clearEventSinks() {
+    onLoad = nil
+    onTracksChanged = nil
+    onProgress = nil
+    onPlaying = nil
+    onPaused = nil
+    onEnded = nil
+    onError = nil
+    onBuffering = nil
+    onPictureInPictureStart = nil
+    onPictureInPictureStop = nil
   }
 
   // MARK: - Player control
 
-  func play() { mediaPlayer.play() }
-  func pause() { mediaPlayer.pause() }
-  func stop() { mediaPlayer.stop() }
+  func play() {
+    mediaPlayer.play()
+  }
+
+  func pause() {
+    if mediaPlayer.canPause {
+      mediaPlayer.pause()
+    }
+  }
+
+  func stop() {
+    mediaPlayer.stop()
+  }
 
   func seek(to seconds: Double) {
     let target = max(0, seconds.isFinite ? seconds : 0)
-    guard Thread.isMainThread else {
-      DispatchQueue.main.async { [weak self] in
-        self?.seek(to: target)
-      }
-      return
-    }
-
-    // libVLC can ignore a time assignment while it is still opening the
-    // media. Retain the request and apply it from the first playable state.
-    pendingSeekSeconds = target
+    NSLog("[EXVLCDBG] seek request=%f state=%d seekable=%d", target, mediaPlayer.state.rawValue, mediaPlayer.isSeekable ? 1 : 0)
+    // libVLC ignores a time assignment while it is still opening the media,
+    // so keep the request and apply it from the first seekable state.
+    pendingSeekSeconds = durationSeconds > 0 ? min(target, durationSeconds) : target
     applyPendingSeekIfReady()
   }
 
   func setRate(_ rate: Double) {
     mediaPlayer.rate = Float(max(0.1, rate))
-  }
-
-  func setContentFit(_ value: String) {
-    contentFit = value
-    switch value {
-    case "fill":
-      drawable.contentMode = .scaleToFill
-    case "cover":
-      drawable.contentMode = .scaleAspectFill
-    default:
-      drawable.contentMode = .scaleAspectFit
-    }
-    drawable.clipsToBounds = true
-    updatePictureInPictureLayerFrame()
-  }
-
-  func setAspectRatio(_ value: String?) {
-    if let ratio = value, ratio == "16:9" || ratio == "4:3" {
-      ratio.withCString { cString in
-        mediaPlayer.videoAspectRatio = UnsafeMutablePointer(mutating: cString)
-      }
-    } else {
-      mediaPlayer.videoAspectRatio = nil
-    }
+    updateTimebaseRate()
   }
 
   func setVolume(_ volume: Float) {
-    mediaPlayer.audio?.volume = Int32(volume * 200)
+    // libVLC treats 100 as unity gain; anything above amplifies.
+    mediaPlayer.audio?.volume = Int32((max(0, min(1, volume)) * 100).rounded())
+  }
+
+  func setContentFit(_ value: String) {
+    surface.contentFit = value
+  }
+
+  func setAspectRatio(_ value: String?) {
+    surface.forcedAspectRatio = value
+  }
+
+  func setAudioTrack(index: Int) {
+    let tracks = audioTracks()
+    if index < 0 {
+      mediaPlayer.currentAudioTrackIndex = -1
+    } else if index < tracks.count {
+      mediaPlayer.currentAudioTrackIndex = tracks[index].vlcIndex
+    }
+    emitTracksIfChanged()
+  }
+
+  func setSubtitleTrack(index: Int) {
+    let tracks = subtitleTracks()
+    if index < 0 {
+      mediaPlayer.currentVideoSubTitleIndex = -1
+    } else if index < tracks.count {
+      mediaPlayer.currentVideoSubTitleIndex = tracks[index].vlcIndex
+    }
+    emitTracksIfChanged()
+  }
+
+  func replace(media: VLCMedia) {
+    durationSeconds = 0
+    didEmitLoad = false
+    didEmitLoadWithDuration = false
+    pendingSeekSeconds = nil
+    isBuffering = false
+    lastProgressEmit = 0
+    lastTracksSignature = ""
+    lastTracksCheck = 0
+    CMTimebaseSetRate(timebase, rate: 0)
+    CMTimebaseSetTime(timebase, time: .zero)
+    displayLayer.flushAndRemoveImage()
+
+    mediaPlayer.media = media
+    mediaPlayer.play()
+    pipController?.invalidatePlaybackState()
+  }
+
+  // MARK: - Frames
+
+  private func enqueue(_ pixelBuffer: CVPixelBuffer) {
+    let width = CVPixelBufferGetWidth(pixelBuffer)
+    let height = CVPixelBufferGetHeight(pixelBuffer)
+    if let format = frameFormat,
+       CMVideoFormatDescriptionGetDimensions(format).width != Int32(width)
+        || CMVideoFormatDescriptionGetDimensions(format).height != Int32(height) {
+      frameFormat = nil
+    }
+    if frameFormat == nil {
+      CMVideoFormatDescriptionCreateForImageBuffer(
+        allocator: kCFAllocatorDefault,
+        imageBuffer: pixelBuffer,
+        formatDescriptionOut: &frameFormat
+      )
+    }
+    guard let format = frameFormat else { return }
+
+    var timing = CMSampleTimingInfo(
+      duration: .invalid,
+      presentationTimeStamp: CMTimebaseGetTime(timebase),
+      decodeTimeStamp: .invalid
+    )
+    var sampleBuffer: CMSampleBuffer?
+    CMSampleBufferCreateReadyWithImageBuffer(
+      allocator: kCFAllocatorDefault,
+      imageBuffer: pixelBuffer,
+      formatDescription: format,
+      sampleTiming: &timing,
+      sampleBufferOut: &sampleBuffer
+    )
+    guard let sampleBuffer else { return }
+    if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true),
+       CFArrayGetCount(attachments) > 0 {
+      let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+      CFDictionarySetValue(
+        dictionary,
+        Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+        Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+      )
+    }
+
+    // The layer stops decoding when the app is backgrounded without PiP;
+    // it must be flushed before it accepts frames again.
+    if displayLayer.status == .failed || displayLayer.requiresFlushToResumeDecoding {
+      displayLayer.flush()
+    }
+    displayLayer.enqueue(sampleBuffer)
+  }
+
+  // MARK: - Time, duration and seeking
+
+  private func currentSeconds() -> Double {
+    Double(mediaPlayer.time.intValue) / 1000.0
+  }
+
+  private func refreshDuration() {
+    let length = Double(mediaPlayer.media?.length.intValue ?? 0) / 1000.0
+    if length > 0, abs(length - durationSeconds) > 0.5 {
+      durationSeconds = length
+      pipController?.invalidatePlaybackState()
+    }
+  }
+
+  private func applyPendingSeekIfReady() {
+    guard let target = pendingSeekSeconds, mediaPlayer.media != nil else { return }
+    switch mediaPlayer.state {
+    case .playing, .paused, .buffering, .esAdded:
+      break
+    default:
+      return
+    }
+    guard mediaPlayer.isSeekable else { return }
+
+    pendingSeekSeconds = nil
+    mediaPlayer.time = VLCTime(int: Int32(clamping: Int((target * 1000).rounded())))
+    CMTimebaseSetTime(timebase, time: CMTime(seconds: target, preferredTimescale: 600))
+    emitProgress(currentTime: target, force: true)
+  }
+
+  private func updateTimebaseRate() {
+    let rate = mediaPlayer.isPlaying && mediaPlayer.state != .paused ? Double(mediaPlayer.rate) : 0
+    CMTimebaseSetRate(timebase, rate: rate)
+  }
+
+  private func syncTimebase(to seconds: Double) {
+    let timebaseSeconds = CMTimebaseGetTime(timebase).seconds
+    if !timebaseSeconds.isFinite || abs(timebaseSeconds - seconds) > 0.75 {
+      CMTimebaseSetTime(timebase, time: CMTime(seconds: seconds, preferredTimescale: 600))
+    }
+  }
+
+  // MARK: - Events
+
+  private func emitLoadIfNeeded() {
+    // Emit once when playback starts, then once more if the duration was
+    // unknown at that point, so resume logic keyed on `onLoad` still runs.
+    let hasDuration = durationSeconds > 0
+    if didEmitLoad && (didEmitLoadWithDuration || !hasDuration) { return }
+    didEmitLoad = true
+    didEmitLoadWithDuration = hasDuration
+    var payload = tracksPayload()
+    payload["duration"] = durationSeconds
+    onLoad?(payload)
+  }
+
+  private func emitProgress(currentTime: Double, force: Bool = false) {
+    let now = CACurrentMediaTime()
+    guard force || now - lastProgressEmit >= 0.25 else { return }
+    lastProgressEmit = now
+    onProgress?([
+      "currentTime": currentTime,
+      "duration": durationSeconds,
+      "position": durationSeconds > 0 ? min(1, currentTime / durationSeconds) : 0,
+    ])
+  }
+
+  private func setBuffering(_ buffering: Bool) {
+    guard isBuffering != buffering else { return }
+    isBuffering = buffering
+    onBuffering?(["isBuffering": buffering])
+  }
+
+  private func tracksPayload() -> [String: Any] {
+    let languages = trackLanguages()
+    let audio = audioTracks().enumerated().map { offset, track in
+      trackEntry(index: offset, track: track, language: languages[track.vlcIndex],
+                 selected: track.vlcIndex == mediaPlayer.currentAudioTrackIndex)
+    }
+    let text = subtitleTracks().enumerated().map { offset, track in
+      trackEntry(index: offset, track: track, language: languages[track.vlcIndex],
+                 selected: track.vlcIndex == mediaPlayer.currentVideoSubTitleIndex)
+    }
+    return ["audioTracks": audio, "textTracks": text]
+  }
+
+  private func trackEntry(index: Int, track: (vlcIndex: Int32, name: String), language: String?, selected: Bool) -> [String: Any] {
+    var entry: [String: Any] = ["index": index, "label": track.name, "selected": selected]
+    if let language, !language.isEmpty { entry["language"] = language }
+    return entry
+  }
+
+  /// libVLC elementary-stream id → language code from the media's track info.
+  private func trackLanguages() -> [Int32: String] {
+    guard let info = mediaPlayer.media?.tracksInformation as? [[String: Any]] else { return [:] }
+    var result: [Int32: String] = [:]
+    for track in info {
+      guard let id = (track[VLCMediaTracksInformationId] as? NSNumber)?.int32Value,
+            let language = track[VLCMediaTracksInformationLanguage] as? String,
+            !language.isEmpty else { continue }
+      result[id] = language
+    }
+    return result
+  }
+
+  /// Emits `onTracksChanged` when the track lists or selections changed.
+  private func emitTracksIfChanged() {
+    let audio = audioTracks()
+    let text = subtitleTracks()
+    let signature = audio.map { "\($0.vlcIndex):\($0.name)" }.joined(separator: ",")
+      + "|\(mediaPlayer.currentAudioTrackIndex)|"
+      + text.map { "\($0.vlcIndex):\($0.name)" }.joined(separator: ",")
+      + "|\(mediaPlayer.currentVideoSubTitleIndex)"
+    guard signature != lastTracksSignature else { return }
+    lastTracksSignature = signature
+    onTracksChanged?(tracksPayload())
+  }
+
+  /// Tracks without libVLC's synthetic "Disable" entry (index -1).
+  private func audioTracks() -> [(vlcIndex: Int32, name: String)] {
+    zipTracks(indexes: mediaPlayer.audioTrackIndexes, names: mediaPlayer.audioTrackNames)
+  }
+
+  private func subtitleTracks() -> [(vlcIndex: Int32, name: String)] {
+    zipTracks(indexes: mediaPlayer.videoSubTitlesIndexes, names: mediaPlayer.videoSubTitlesNames)
+  }
+
+  private func zipTracks(indexes: [Any]?, names: [Any]?) -> [(vlcIndex: Int32, name: String)] {
+    let indexes = (indexes ?? []).compactMap { ($0 as? NSNumber)?.int32Value }
+    let names = (names ?? []).map { "\($0)" }
+    return indexes.enumerated().compactMap { offset, vlcIndex in
+      guard vlcIndex >= 0 else { return nil }
+      return (vlcIndex, offset < names.count ? names[offset] : "Track \(offset)")
+    }
+  }
+
+  // MARK: - Picture-in-Picture
+
+  /// Builds the PiP controller as soon as the layer is on screen. AVKit only
+  /// reports `isPictureInPicturePossible` after the controller has observed
+  /// the layer for a moment, so creating it lazily on the button tap makes
+  /// the first start fail.
+  func preparePictureInPicture() {
+    guard pipController == nil, !isDestroyed,
+          AVPictureInPictureController.isPictureInPictureSupported() else { return }
+
+    let contentSource = AVPictureInPictureController.ContentSource(
+      sampleBufferDisplayLayer: displayLayer,
+      playbackDelegate: self
+    )
+    let controller = AVPictureInPictureController(contentSource: contentSource)
+    controller.delegate = self
+    controller.canStartPictureInPictureAutomaticallyFromInline = startsPictureInPictureAutomatically
+    pipObservations = [
+      controller.observe(\.isPictureInPicturePossible, options: [.new]) { [weak self] controller, _ in
+        DispatchQueue.main.async {
+          guard let self, controller.isPictureInPicturePossible, !self.pipStartWaiters.isEmpty else { return }
+          controller.startPictureInPicture()
+        }
+      },
+    ]
+    pipController = controller
   }
 
   func isPictureInPictureActive() -> Bool {
     pipController?.isPictureInPictureActive ?? false
   }
 
-  func setAudioTrack(index: Int) {
-    if index < 0 {
-      mediaPlayer.currentAudioTrackIndex = -1
-    } else {
-      let tracks = mediaPlayer.audioTrackIndexes as? [Int32] ?? []
-      if index < tracks.count {
-        mediaPlayer.currentAudioTrackIndex = tracks[index]
-      }
+  /// Resolves `true` once PiP is on screen, `false` if it cannot start.
+  func startPictureInPicture(completion: @escaping (Bool) -> Void) {
+    guard AVPictureInPictureController.isPictureInPictureSupported() else {
+      completion(false)
+      return
+    }
+    preparePictureInPicture()
+    guard let controller = pipController else {
+      completion(false)
+      return
+    }
+    if controller.isPictureInPictureActive {
+      completion(true)
+      return
+    }
+
+    pipStartWaiters.append(completion)
+    if controller.isPictureInPicturePossible {
+      controller.startPictureInPicture()
+    }
+    // The KVO observer above starts PiP once it becomes possible; give up
+    // if the system never allows it (e.g. no frame has been rendered yet).
+    DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+      self?.resolvePictureInPictureWaiters(false)
     }
   }
 
-  func setSubtitleTrack(index: Int) {
-    if index < 0 {
-      mediaPlayer.currentVideoSubTitleIndex = -1
-    } else {
-      let tracks = mediaPlayer.videoSubTitlesIndexes as? [Int32] ?? []
-      if index < tracks.count {
-        mediaPlayer.currentVideoSubTitleIndex = tracks[index]
-      }
-    }
-  }
-
-  func replace(media: VLCMedia) {
-    durationPollTimer?.invalidate()
-    durationPollTimer = nil
-    durationPollAttempts = 0
-    durationSecondsCache = 0
-    didEmitDurationLoad = false
-    pendingSeekSeconds = nil
-    mediaPlayer.media = media
-    mediaPlayer.play()
-  }
-
-  private func readDurationSeconds() -> Double {
-    let duration = Double(mediaPlayer.media?.length.intValue ?? 0) / 1000.0
-    return duration > 0 ? duration : durationSecondsCache
-  }
-
-  private func applyPendingSeekIfReady() {
-    guard let target = pendingSeekSeconds, mediaPlayer.media != nil else { return }
-    guard mediaPlayer.state != .opening else { return }
-
-    mediaPlayer.time = VLCTime(int: Int32(target * 1000))
-    pendingSeekSeconds = nil
-  }
-
-  private func emitDurationLoadIfReady() {
-    guard durationSecondsCache > 0, !didEmitDurationLoad else { return }
-    didEmitDurationLoad = true
-    onLoad?([
-      "duration": durationSecondsCache,
-      "audioTracks": audioTracksPayload(),
-      "textTracks": textTracksPayload(),
-    ])
-  }
-
-  private func emitProgress() {
-    let current = Double(mediaPlayer.time.intValue) / 1000.0
-    let total = durationSecondsCache
-    let position = total > 0 ? current / total : 0
-    onProgress?([
-      "currentTime": current,
-      "duration": total,
-      "position": position,
-    ])
-  }
-
-  private func scheduleDurationPolling() {
-    guard durationSecondsCache <= 0, durationPollTimer == nil else { return }
-    durationPollAttempts = 0
-    durationPollTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
-      guard let self else {
-        timer.invalidate()
-        return
-      }
-
-      self.durationPollAttempts += 1
-      let duration = self.readDurationSeconds()
-      if duration > 0 {
-        self.durationSecondsCache = duration
-        self.applyPendingSeekIfReady()
-        self.emitDurationLoadIfReady()
-        self.emitProgress()
-        timer.invalidate()
-        self.durationPollTimer = nil
-      } else if self.durationPollAttempts >= 40 {
-        timer.invalidate()
-        self.durationPollTimer = nil
-      }
-    }
-  }
-
-  // MARK: - Picture-in-Picture
-
-  @discardableResult
-  func startPictureInPicture() -> Bool {
-    if !Thread.isMainThread {
-      var result = false
-      DispatchQueue.main.sync {
-        result = self.startPictureInPicture()
-      }
-      return result
-    }
-
-    guard AVPictureInPictureController.isPictureInPictureSupported() else { return false }
-    guard let drawable = mediaPlayer.drawable as? UIView else { return false }
-
-    if pipController != nil {
-      pipController?.startPictureInPicture()
-      startSnapshotBridge()
-      return true
-    }
-
-    if sampleBufferDisplayLayer.superlayer == nil {
-      drawable.layer.addSublayer(sampleBufferDisplayLayer)
-    }
-    updatePictureInPictureLayerFrame()
-
-    let contentSource = AVPictureInPictureController.ContentSource(
-      sampleBufferDisplayLayer: sampleBufferDisplayLayer,
-      playbackDelegate: pipSampleBufferDelegate
-    )
-    let controller = AVPictureInPictureController(contentSource: contentSource)
-    controller.delegate = self
-    controller.canStartPictureInPictureAutomaticallyFromInline = false
-    pipController = controller
-
-    startSnapshotBridge()
-    controller.startPictureInPicture()
+  func stopPictureInPicture() -> Bool {
+    guard let controller = pipController, controller.isPictureInPictureActive else { return false }
+    controller.stopPictureInPicture()
     return true
   }
 
-  private func updatePictureInPictureLayerFrame() {
-    guard sampleBufferDisplayLayer.superlayer != nil else { return }
-    sampleBufferDisplayLayer.frame = drawable.bounds
-  }
-
-  @discardableResult
-  func stopPictureInPicture() -> Bool {
-    if !Thread.isMainThread {
-      var result = false
-      DispatchQueue.main.sync {
-        result = self.stopPictureInPicture()
-      }
-      return result
-    }
-
-    let wasActive = pipController?.isPictureInPictureActive ?? false
-    pipController?.stopPictureInPicture()
-    stopSnapshotBridge()
-    return wasActive
-  }
-
-  // MARK: - Snapshot bridge
-
-  private func startSnapshotBridge() {
-    stopSnapshotBridge()
-    let link = CADisplayLink(target: self, selector: #selector(snapshotTick))
-    link.add(to: .main, forMode: .common)
-    displayLink = link
-  }
-
-  private func stopSnapshotBridge() {
-    displayLink?.invalidate()
-    displayLink = nil
-  }
-
-  @objc private func snapshotTick() {
-    snapshotCounter &+= 1
-    let tempDir = NSTemporaryDirectory()
-    let path = (tempDir as NSString).appendingPathComponent("exvlc-\(id)-\(snapshotCounter).jpg")
-    mediaPlayer.saveVideoSnapshot(at: path, withWidth: 0, andHeight: 0)
-    DispatchQueue.main.async { [weak self] in
-      self?.consumeSnapshot(at: path)
-    }
-  }
-
-  private func consumeSnapshot(at path: String) {
-    guard FileManager.default.fileExists(atPath: path) else { return }
-    defer { try? FileManager.default.removeItem(atPath: path) }
-    guard let image = UIImage(contentsOfFile: path) else { return }
-    pipBridge.feed(image: image)
+  private func resolvePictureInPictureWaiters(_ started: Bool) {
+    let waiters = pipStartWaiters
+    pipStartWaiters.removeAll()
+    waiters.forEach { $0(started) }
   }
 }
 
@@ -329,98 +468,77 @@ final class PlayerSession: NSObject {
 
 extension PlayerSession: VLCMediaPlayerDelegate {
   func mediaPlayerStateChanged(_ aNotification: Notification) {
-    let duration = readDurationSeconds()
-    if duration > 0 {
-      durationSecondsCache = duration
-    }
+    guard !isDestroyed else { return }
+    refreshDuration()
+    updateTimebaseRate()
+    NSLog("[EXVLCDBG] state=%d duration=%f seekable=%d sinks=%d", mediaPlayer.state.rawValue, durationSeconds, mediaPlayer.isSeekable ? 1 : 0, onProgress == nil ? 0 : 1)
 
     switch mediaPlayer.state {
     case .opening:
-      onLoad?([
-        "duration": duration,
-        "audioTracks": audioTracksPayload(),
-        "textTracks": textTracksPayload(),
-      ])
-      if duration <= 0 { scheduleDurationPolling() }
-    case .playing:
+      setBuffering(true)
+    case .buffering:
+      // libVLC reports buffering repeatedly while it plays; the next time
+      // update clears it.
+      setBuffering(true)
       applyPendingSeekIfReady()
-      emitDurationLoadIfReady()
-      onPlaying?(["duration": duration])
-      if duration > 0 {
-        emitProgress()
-      } else {
-        scheduleDurationPolling()
-      }
+    case .playing:
+      emitLoadIfNeeded()
+      emitTracksIfChanged()
+      applyPendingSeekIfReady()
+      onPlaying?(["duration": durationSeconds])
     case .paused:
       applyPendingSeekIfReady()
-      onPaused?([:])
-    case .stopped:
-      onEnded?()
+      setBuffering(false)
+      onPaused?(["target": currentSeconds()])
     case .ended:
+      setBuffering(false)
       onEnded?()
     case .error:
+      setBuffering(false)
       onError?([
-        "message": "VLCMediaPlayer reported error state",
+        "message": "The media could not be played.",
         "code": "VLC_ERROR",
         "domain": "MobileVLCKit",
       ])
-    case .buffering:
-      onBuffering?(["isBuffering": true])
     case .esAdded:
-      // Track metadata becomes available after the elementary streams are
-      // announced; the next opening/playing callback carries the payload.
+      emitTracksIfChanged()
+    case .stopped:
       break
     @unknown default:
       break
     }
+    pipController?.invalidatePlaybackState()
   }
 
   func mediaPlayerTimeChanged(_ aNotification: Notification) {
-    let current = Double(mediaPlayer.time.intValue) / 1000.0
-    let detectedDuration = readDurationSeconds()
-    if detectedDuration > 0 {
-      durationSecondsCache = detectedDuration
-      emitDurationLoadIfReady()
-    } else {
-      scheduleDurationPolling()
-    }
-
+    guard !isDestroyed else { return }
+    refreshDuration()
+    emitLoadIfNeeded()
     applyPendingSeekIfReady()
-    let total = durationSecondsCache
-    let position = total > 0 ? current / total : 0
-    onProgress?([
-      "currentTime": current,
-      "duration": total,
-      "position": position,
-    ])
-  }
-
-  private func audioTracksPayload() -> [[String: Any]] {
-    let indexes = (mediaPlayer.audioTrackIndexes as? [Int32]) ?? []
-    return indexes.enumerated().map { (i, _) -> [String: Any] in
-      ["index": i]
+    let now = CACurrentMediaTime()
+    if now - lastTracksCheck >= 1 {
+      lastTracksCheck = now
+      emitTracksIfChanged()
     }
-  }
+    setBuffering(false)
 
-  private func textTracksPayload() -> [[String: Any]] {
-    let indexes = (mediaPlayer.videoSubTitlesIndexes as? [Int32]) ?? []
-    return indexes.enumerated().map { (i, _) -> [String: Any] in
-      ["index": i]
-    }
+    let current = currentSeconds()
+    NSLog("[EXVLCDBG] time=%f duration=%f sinks=%d", current, durationSeconds, onProgress == nil ? 0 : 1)
+    syncTimebase(to: current)
+    updateTimebaseRate()
+    emitProgress(currentTime: current)
   }
 }
 
 // MARK: - AVPictureInPictureControllerDelegate
 
 extension PlayerSession: AVPictureInPictureControllerDelegate {
-  func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {}
-
   func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    resolvePictureInPictureWaiters(true)
     onPictureInPictureStart?()
   }
 
   func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-    stopSnapshotBridge()
     onPictureInPictureStop?()
   }
 
@@ -428,7 +546,7 @@ extension PlayerSession: AVPictureInPictureControllerDelegate {
     _ pictureInPictureController: AVPictureInPictureController,
     failedToStartPictureInPictureWithError error: Error
   ) {
-    stopSnapshotBridge()
+    resolvePictureInPictureWaiters(false)
     onError?([
       "message": "Picture-in-Picture failed to start: \(error.localizedDescription)",
       "code": "PIP_FAILED",
@@ -442,57 +560,30 @@ extension PlayerSession: AVPictureInPictureControllerDelegate {
   ) {
     completionHandler(true)
   }
-
-  override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
-    if keyPath == "pictureInPictureActive" {
-      if let active = change?[.newKey] as? Bool, !active {
-        stopSnapshotBridge()
-      }
-    } else {
-      super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
-    }
-  }
 }
 
-// MARK: - SampleBufferPlaybackDelegate
+// MARK: - AVPictureInPictureSampleBufferPlaybackDelegate
 
-final class SampleBufferPlaybackDelegate: NSObject, AVPictureInPictureSampleBufferPlaybackDelegate {
-  weak var session: PlayerSession?
-
-  init(session: PlayerSession) {
-    self.session = session
-    super.init()
-  }
-
-  func pictureInPictureController(
-    _ pictureInPictureController: AVPictureInPictureController,
-    setPlaying playing: Bool
-  ) {
+extension PlayerSession: AVPictureInPictureSampleBufferPlaybackDelegate {
+  func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool) {
     if playing {
-      session?.play()
+      play()
     } else {
-      session?.pause()
+      pause()
     }
   }
 
-  func pictureInPictureControllerTimeRangeForPlayback(
-    _ pictureInPictureController: AVPictureInPictureController
-  ) -> CMTimeRange {
-    let start = session?.mediaPlayer.time ?? VLCTime(int: 0)
-    let length = session?.mediaPlayer.media?.length ?? VLCTime(int: 0)
-    let startSec = Double(start.intValue) / 1000.0
-    let lengthSec = Double(length.intValue) / 1000.0
-    if lengthSec <= 0 { return .invalid }
-    return CMTimeRange(
-      start: CMTime(seconds: startSec, preferredTimescale: 600),
-      duration: CMTime(seconds: lengthSec, preferredTimescale: 600)
-    )
+  func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
+    // Live streams have no seekable range; an infinite range makes PiP
+    // show its live UI instead of a scrubber.
+    guard durationSeconds > 0 else {
+      return CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
+    }
+    return CMTimeRange(start: .zero, duration: CMTime(seconds: durationSeconds, preferredTimescale: 600))
   }
 
-  func pictureInPictureControllerIsPlaybackPaused(
-    _ pictureInPictureController: AVPictureInPictureController
-  ) -> Bool {
-    !(session?.mediaPlayer.isPlaying ?? false)
+  func pictureInPictureControllerIsPlaybackPaused(_ pictureInPictureController: AVPictureInPictureController) -> Bool {
+    !mediaPlayer.isPlaying || mediaPlayer.state == .paused
   }
 
   func pictureInPictureController(
@@ -503,11 +594,76 @@ final class SampleBufferPlaybackDelegate: NSObject, AVPictureInPictureSampleBuff
   func pictureInPictureController(
     _ pictureInPictureController: AVPictureInPictureController,
     skipByInterval skipInterval: CMTime,
-    completion completionHandler: @escaping @Sendable () -> Void
+    completion completionHandler: @escaping () -> Void
   ) {
-    let current = Double(session?.mediaPlayer.time.intValue ?? 0) / 1000.0
     let offset = CMTimeGetSeconds(skipInterval)
-    session?.seek(to: current + (offset.isFinite ? offset : 0))
+    seek(to: currentSeconds() + (offset.isFinite ? offset : 0))
     completionHandler()
+  }
+}
+
+// MARK: - Surface
+
+/// Hosts the session's display layer inside the React view and applies
+/// `contentFit` / forced aspect ratios to it.
+final class PlayerSurfaceView: UIView {
+  private let displayLayer: AVSampleBufferDisplayLayer
+
+  var contentFit = "contain" {
+    didSet { setNeedsLayout() }
+  }
+
+  var forcedAspectRatio: String? {
+    didSet { setNeedsLayout() }
+  }
+
+  init(displayLayer: AVSampleBufferDisplayLayer) {
+    self.displayLayer = displayLayer
+    super.init(frame: .zero)
+    backgroundColor = .black
+    clipsToBounds = true
+    layer.addSublayer(displayLayer)
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) is not supported")
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    if let ratio = parsedAspectRatio() {
+      // A forced ratio stretches the picture into a centred box of that
+      // shape, matching libVLC's `--aspect-ratio` behaviour.
+      let width = min(bounds.width, bounds.height * ratio)
+      let height = width / ratio
+      displayLayer.frame = CGRect(
+        x: (bounds.width - width) / 2,
+        y: (bounds.height - height) / 2,
+        width: width,
+        height: height
+      )
+      displayLayer.videoGravity = .resize
+    } else {
+      displayLayer.frame = bounds
+      switch contentFit {
+      case "cover":
+        displayLayer.videoGravity = .resizeAspectFill
+      case "fill":
+        displayLayer.videoGravity = .resize
+      default:
+        displayLayer.videoGravity = .resizeAspect
+      }
+    }
+    CATransaction.commit()
+  }
+
+  private func parsedAspectRatio() -> CGFloat? {
+    guard let value = forcedAspectRatio else { return nil }
+    let parts = value.split(separator: ":").compactMap { Double($0) }
+    guard parts.count == 2, parts[0] > 0, parts[1] > 0 else { return nil }
+    return CGFloat(parts[0] / parts[1])
   }
 }

@@ -19,6 +19,7 @@ class ExtendedVlcPlayerViewComponentView(context: Context, appContext: AppContex
   private var contentFit: String = "contain"
 
   val onLoad by EventDispatcher<Map<String, Any>>()
+  val onTracksChanged by EventDispatcher<Map<String, Any>>()
   val onProgress by EventDispatcher<Map<String, Any>>()
   val onPlaying by EventDispatcher<Map<String, Any>>()
   val onPaused by EventDispatcher<Map<String, Any>>()
@@ -58,6 +59,7 @@ class ExtendedVlcPlayerViewComponentView(context: Context, appContext: AppContex
     post { session.attachSurfaceIfReady() }
     // Wire event sinks to forward to the JS dispatcher.
     session.onLoad = { payload -> onLoad(payload) }
+    session.onTracksChanged = { payload -> onTracksChanged(payload) }
     session.onProgress = { payload -> onProgress(payload) }
     session.onPlaying = { payload -> onPlaying(payload) }
     session.onPaused = { payload -> onPaused(payload) }
@@ -73,6 +75,7 @@ class ExtendedVlcPlayerViewComponentView(context: Context, appContext: AppContex
     val session = PlayerRegistry.session(playerId) ?: return
     this.removeView(session.drawable)
     session.onLoad = null
+    session.onTracksChanged = null
     session.onProgress = null
     session.onPlaying = null
     session.onPaused = null

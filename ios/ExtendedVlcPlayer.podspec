@@ -21,10 +21,10 @@ Pod::Spec.new do |s|
   s.dependency 'ExpoModulesCore'
   s.dependency 'MobileVLCKit', '~> 3.7.0'
 
-  # The view is implemented as an ExpoView. Keeping this pod Swift-only on
-  # Apple avoids the legacy Obj-C++ Fabric bridge and lets Expo 57 register
-  # the view through the same View(...) definition as Android.
-  s.source_files = '**/*.swift'
+  # The view is implemented as an ExpoView, registered through the same
+  # View(...) definition as Android. The only Objective-C file is the libVLC
+  # frame sink, which needs the C callback API.
+  s.source_files = '**/*.{swift,h,m}'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',

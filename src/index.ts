@@ -17,4 +17,5 @@ export type {
   ExtendedVlcProgressEvent,
   ExtendedVlcSource,
   ExtendedVlcTrack,
+  ExtendedVlcTracksEvent,
 } from './types';

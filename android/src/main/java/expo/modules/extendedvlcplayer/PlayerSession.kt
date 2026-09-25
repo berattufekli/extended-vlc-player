@@ -43,6 +43,7 @@ class PlayerSession(
   // Event sinks. Wired up by the Fabric view component when the view
   // mounts; the player fires them on the main thread via `mediaPlayer.EventListener`.
   var onLoad: ((Map<String, Any>) -> Unit)? = null
+  var onTracksChanged: ((Map<String, Any>) -> Unit)? = null
   var onProgress: ((Map<String, Any>) -> Unit)? = null
   var onPlaying: ((Map<String, Any>) -> Unit)? = null
   var onPaused: ((Map<String, Any>) -> Unit)? = null
@@ -61,6 +62,7 @@ class PlayerSession(
   private var durationPollAttempts = 0
   private var pendingSeekSeconds: Double? = null
   private var didEmitDurationLoad = false
+  private var lastTracksSignature = ""
   private val durationPollRunnable = object : Runnable {
     override fun run() {
       val duration = readDurationSeconds()
@@ -111,6 +113,7 @@ class PlayerSession(
           durationSecondsCache = readDurationSeconds()
           applyPendingSeekIfReady()
           emitDurationLoadIfReady()
+          emitTracksIfChanged()
           onPlaying?.invoke(mapOf("duration" to durationSecondsCache))
           if (durationSecondsCache > 0) emitProgress() else scheduleDurationPolling()
         }
@@ -130,13 +133,7 @@ class PlayerSession(
         MediaPlayer.Event.Buffering -> onBuffering?.invoke(mapOf("isBuffering" to (event.getBuffering() < 100.0f)))
         MediaPlayer.Event.Opening -> {
           Log.i(TAG, "event Opening id=$id")
-          onLoad?.invoke(
-            mapOf(
-              "duration" to readDurationSeconds(),
-              "audioTracks" to emptyList<Map<String, Any>>(),
-              "textTracks" to emptyList<Map<String, Any>>()
-            )
-          )
+          onLoad?.invoke(mapOf("duration" to readDurationSeconds()) + tracksPayload())
           scheduleDurationPolling()
         }
         MediaPlayer.Event.TimeChanged -> {
@@ -150,6 +147,9 @@ class PlayerSession(
           applyPendingSeekIfReady()
           emitProgress()
         }
+        MediaPlayer.Event.ESAdded,
+        MediaPlayer.Event.ESDeleted,
+        MediaPlayer.Event.ESSelected -> emitTracksIfChanged()
       }
     }
   }
@@ -170,6 +170,7 @@ class PlayerSession(
     durationPollAttempts = 0
     pendingSeekSeconds = null
     didEmitDurationLoad = false
+    lastTracksSignature = ""
     mediaPlayer.media = media
     mediaPlayer.play()
   }
@@ -230,13 +231,55 @@ class PlayerSession(
   private fun emitDurationLoadIfReady() {
     if (durationSecondsCache <= 0 || didEmitDurationLoad) return
     didEmitDurationLoad = true
-    onLoad?.invoke(
-      mapOf(
-        "duration" to durationSecondsCache,
-        "audioTracks" to emptyList<Map<String, Any>>(),
-        "textTracks" to emptyList<Map<String, Any>>()
-      )
+    onLoad?.invoke(mapOf("duration" to durationSecondsCache) + tracksPayload())
+  }
+
+  private fun audioDescriptions(): List<MediaPlayer.TrackDescription> =
+    (mediaPlayer.audioTracks ?: emptyArray()).filter { it.id >= 0 }
+
+  private fun subtitleDescriptions(): List<MediaPlayer.TrackDescription> =
+    (mediaPlayer.spuTracks ?: emptyArray()).filter { it.id >= 0 }
+
+  /** Elementary-stream id → language from the current media's tracks. */
+  private fun trackLanguages(): Map<Int, String> {
+    val media = currentMedia ?: return emptyMap()
+    val result = mutableMapOf<Int, String>()
+    for (i in 0 until media.trackCount) {
+      val track = media.getTrack(i) ?: continue
+      val language = track.language
+      if (!language.isNullOrBlank()) result[track.id] = language
+    }
+    return result
+  }
+
+  private fun trackEntry(index: Int, track: MediaPlayer.TrackDescription, language: String?, selected: Boolean): Map<String, Any> {
+    val entry = mutableMapOf<String, Any>(
+      "index" to index,
+      "label" to (track.name ?: "Track ${index + 1}"),
+      "selected" to selected
     )
+    if (!language.isNullOrBlank()) entry["language"] = language
+    return entry
+  }
+
+  private fun tracksPayload(): Map<String, Any> {
+    val languages = trackLanguages()
+    val audioSelected = mediaPlayer.audioTrack
+    val spuSelected = mediaPlayer.spuTrack
+    return mapOf(
+      "audioTracks" to audioDescriptions().mapIndexed { i, t -> trackEntry(i, t, languages[t.id], t.id == audioSelected) },
+      "textTracks" to subtitleDescriptions().mapIndexed { i, t -> trackEntry(i, t, languages[t.id], t.id == spuSelected) }
+    )
+  }
+
+  private fun emitTracksIfChanged() {
+    val signature = audioDescriptions().joinToString(",") { "${it.id}:${it.name}" } +
+      "|${mediaPlayer.audioTrack}|" +
+      subtitleDescriptions().joinToString(",") { "${it.id}:${it.name}" } +
+      "|${mediaPlayer.spuTrack}"
+    if (signature == lastTracksSignature) return
+    lastTracksSignature = signature
+    onTracksChanged?.invoke(tracksPayload())
   }
 
   private fun emitProgress() {
@@ -283,23 +326,17 @@ class PlayerSession(
   }
 
   fun setAudioTrack(index: Int) {
-    val tracks = mediaPlayer.audioTracks ?: return
-    if (index in tracks.indices) {
-      val track = tracks[index]
-      mediaPlayer.audioTrack = track.id
-    } else if (index < 0) {
-      mediaPlayer.audioTrack = -1
-    }
+    val tracks = audioDescriptions()
+    if (index < 0) mediaPlayer.audioTrack = -1
+    else if (index in tracks.indices) mediaPlayer.audioTrack = tracks[index].id
+    emitTracksIfChanged()
   }
 
   fun setSubtitleTrack(index: Int) {
-    val tracks = mediaPlayer.spuTracks ?: return
-    if (index in tracks.indices) {
-      val track = tracks[index]
-      mediaPlayer.spuTrack = track.id
-    } else if (index < 0) {
-      mediaPlayer.spuTrack = -1
-    }
+    val tracks = subtitleDescriptions()
+    if (index < 0) mediaPlayer.spuTrack = -1
+    else if (index in tracks.indices) mediaPlayer.spuTrack = tracks[index].id
+    emitTracksIfChanged()
   }
 
   fun isInPiP(): Boolean = isInPiP

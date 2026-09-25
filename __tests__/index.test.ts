@@ -38,4 +38,16 @@ describe('extended-vlc-player public surface', () => {
     expect(typeof sample.play).toBe('function');
     expect(typeof sample.startPictureInPicture).toBe('function');
   });
+
+  it('describes tracks with language and selection state', () => {
+    type Props = import('../src').ExtendedVlcPlayerViewProps;
+    const tracks: import('../src').ExtendedVlcTracksEvent = {
+      audioTracks: [{ index: 0, label: 'Türkçe', language: 'tur', selected: true }],
+      textTracks: [],
+    };
+    const handler: NonNullable<Props['onTracksChanged']> = (event) => {
+      expect(event.audioTracks[0].selected).toBe(true);
+    };
+    handler(tracks);
+  });
 });

@@ -37,6 +37,7 @@ class ExtendedVlcPlayerModule : Module() {
       Name("ExtendedVlcPlayerView")
       Events(
         "onLoad",
+        "onTracksChanged",
         "onProgress",
         "onPlaying",
         "onPaused",
