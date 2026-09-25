@@ -48,6 +48,13 @@ final class PlayerSession: NSObject {
   private var didEmitLoad = false
   private var didEmitLoadWithDuration = false
   private var pendingSeekSeconds: Double?
+  /// Set once a seek is applied to `mediaPlayer.time`; cleared once playback
+  /// confirms it (or after the deadline below). Verified from
+  /// `mediaPlayerTimeChanged`, since libVLC can silently drop a `time`
+  /// assignment made while a stream is still opening/buffering.
+  private var seekVerifyTarget: Double?
+  private var seekVerifyDeadline: CFTimeInterval = 0
+  private var lastSeekReapply: CFTimeInterval = 0
   private var isBuffering = false
   private var lastProgressEmit: CFTimeInterval = 0
   private var lastTracksSignature = ""
@@ -192,6 +199,9 @@ final class PlayerSession: NSObject {
     didEmitLoad = false
     didEmitLoadWithDuration = false
     pendingSeekSeconds = nil
+    seekVerifyTarget = nil
+    seekVerifyDeadline = 0
+    lastSeekReapply = 0
     isBuffering = false
     lastProgressEmit = 0
     lastTracksSignature = ""
@@ -272,8 +282,12 @@ final class PlayerSession: NSObject {
 
   private func applyPendingSeekIfReady() {
     guard let target = pendingSeekSeconds, mediaPlayer.media != nil else { return }
+    // Only apply once playback has actually started: libVLC silently drops a
+    // `time` assignment made while the stream is still opening/buffering
+    // (`.esAdded`/`.buffering`), which is why the seek used to appear to
+    // "take" but then continue from the original position.
     switch mediaPlayer.state {
-    case .playing, .paused, .buffering, .esAdded:
+    case .playing, .paused:
       break
     default:
       return
@@ -281,9 +295,33 @@ final class PlayerSession: NSObject {
     guard mediaPlayer.isSeekable else { return }
 
     pendingSeekSeconds = nil
+    let now = CACurrentMediaTime()
+    seekVerifyTarget = target
+    seekVerifyDeadline = now + 5
+    lastSeekReapply = now
     mediaPlayer.time = VLCTime(int: Int32(clamping: Int((target * 1000).rounded())))
     CMTimebaseSetTime(timebase, time: CMTime(seconds: target, preferredTimescale: 600))
     emitProgress(currentTime: target, force: true)
+  }
+
+  /// Re-asserts `mediaPlayer.time` if the reported time drifts back from a
+  /// just-applied seek target — libVLC can accept the assignment but then
+  /// keep delivering pre-seek time updates for a beat on HLS VOD.
+  private func verifySeekIfNeeded(currentTime: Double) {
+    guard let target = seekVerifyTarget else { return }
+    let now = CACurrentMediaTime()
+    if abs(currentTime - target) <= 3 {
+      seekVerifyTarget = nil
+      return
+    }
+    if now >= seekVerifyDeadline {
+      seekVerifyTarget = nil
+      return
+    }
+    guard now - lastSeekReapply >= 0.5 else { return }
+    lastSeekReapply = now
+    NSLog("[EXVLCDBG] seek re-apply target=%f current=%f", target, currentTime)
+    mediaPlayer.time = VLCTime(int: Int32(clamping: Int((target * 1000).rounded())))
   }
 
   private func updateTimebaseRate() {
@@ -524,6 +562,7 @@ extension PlayerSession: VLCMediaPlayerDelegate {
 
     let current = currentSeconds()
     NSLog("[EXVLCDBG] time=%f duration=%f sinks=%d", current, durationSeconds, onProgress == nil ? 0 : 1)
+    verifySeekIfNeeded(currentTime: current)
     syncTimebase(to: current)
     updateTimebaseRate()
     emitProgress(currentTime: current)

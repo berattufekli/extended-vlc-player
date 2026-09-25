@@ -63,6 +63,12 @@ class PlayerSession(
   private var pendingSeekSeconds: Double? = null
   private var didEmitDurationLoad = false
   private var lastTracksSignature = ""
+  // Set once a seek is applied to `mediaPlayer.time`; cleared once playback
+  // confirms it (or after the deadline below). Verified from TimeChanged,
+  // since libVLC can silently drop a `time` assignment made too early.
+  private var seekVerifyTarget: Double? = null
+  private var seekVerifyDeadlineMs: Long = 0
+  private var lastSeekReapplyMs: Long = 0
   private val durationPollRunnable = object : Runnable {
     override fun run() {
       val duration = readDurationSeconds()
@@ -145,6 +151,7 @@ class PlayerSession(
             scheduleDurationPolling()
           }
           applyPendingSeekIfReady()
+          verifySeekIfNeeded(mediaPlayer.time / 1000.0)
           emitProgress()
         }
         MediaPlayer.Event.ESAdded,
@@ -171,6 +178,9 @@ class PlayerSession(
     pendingSeekSeconds = null
     didEmitDurationLoad = false
     lastTracksSignature = ""
+    seekVerifyTarget = null
+    seekVerifyDeadlineMs = 0
+    lastSeekReapplyMs = 0
     mediaPlayer.media = media
     mediaPlayer.play()
   }
@@ -302,9 +312,39 @@ class PlayerSession(
 
   private fun applyPendingSeekIfReady() {
     val target = pendingSeekSeconds ?: return
-    if (mediaPlayer.getLength() <= 0 && !mediaPlayer.isPlaying) return
-    mediaPlayer.time = (target * 1000).toLong()
+    // Only apply once playback has actually started: libVLC can silently
+    // drop a `time` assignment made before playback begins, which is why a
+    // seek could appear to "take" but then continue from the original
+    // position.
+    if (!mediaPlayer.isPlaying) return
     pendingSeekSeconds = null
+    val now = System.currentTimeMillis()
+    seekVerifyTarget = target
+    seekVerifyDeadlineMs = now + 5000L
+    lastSeekReapplyMs = now
+    mediaPlayer.time = (target * 1000).toLong()
+  }
+
+  /**
+   * Re-asserts `mediaPlayer.time` if the reported time drifts back from a
+   * just-applied seek target — libVLC can accept the assignment but then
+   * keep delivering pre-seek time updates for a beat on HLS VOD.
+   */
+  private fun verifySeekIfNeeded(currentSeconds: Double) {
+    val target = seekVerifyTarget ?: return
+    val now = System.currentTimeMillis()
+    if (Math.abs(currentSeconds - target) <= 3.0) {
+      seekVerifyTarget = null
+      return
+    }
+    if (now >= seekVerifyDeadlineMs) {
+      seekVerifyTarget = null
+      return
+    }
+    if (now - lastSeekReapplyMs < 500L) return
+    lastSeekReapplyMs = now
+    Log.i(TAG, "seek re-apply target=$target current=$currentSeconds")
+    mediaPlayer.time = (target * 1000).toLong()
   }
 
   fun play() = mediaPlayer.play()
