@@ -75,6 +75,6 @@ final class PlayerRegistryBridge: NSObject {
 /// Swift registry bridge can forward events to the view, which in turn
 /// surfaces them via the standard Fabric event system. This indirection
 /// keeps Swift-only types out of the Obj-C++ source.
-@objc protocol ExtendedVlcPlayerViewEventReceiver {
+@objc public protocol ExtendedVlcPlayerViewEventReceiver {
   func exvlcEmit(_ name: String, _ payload: [AnyHashable: Any])
 }

@@ -57,6 +57,8 @@ export interface ExtendedVlcPlayerViewProps {
   player: ExtendedVlcPlayer;
   style?: ViewStyle;
   contentFit?: ContentFit;
+  /** Forces VLC's output geometry when the source reports an unreliable ratio. */
+  aspectRatio?: '16:9' | '4:3' | string;
   onLoad?: (e: ExtendedVlcLoadEvent) => void;
   onProgress?: (e: ExtendedVlcProgressEvent) => void;
   onPlaying?: (e: { duration: number }) => void;

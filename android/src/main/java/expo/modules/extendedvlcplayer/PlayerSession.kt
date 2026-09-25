@@ -7,6 +7,7 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import android.util.Rational
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -24,11 +25,18 @@ class PlayerSession(
   val id: Int,
   private val context: Context
 ) {
+  private companion object {
+    const val TAG = "ExtendedVlcPlayer"
+  }
+
   private val surfaceView = SurfaceView(context)
   val drawable: SurfaceView get() = surfaceView
 
-  private val libVlc: LibVLC = LibVLC(context, listOf("--no-osd", "--no-stats"))
-  val mediaPlayer: MediaPlayer = MediaPlayer(libVlc)
+  // LibVLC appends its default audio/video options to this list while it
+  // initializes. A Kotlin `listOf` is immutable and causes
+  // UnsupportedOperationException inside LibVLC's constructor.
+  private val libVlc = LibVLC(context, mutableListOf("--no-osd", "--no-stats"))
+  val mediaPlayer = MediaPlayer(libVlc)
 
   // Event sinks. Wired up by the Fabric view component when the view
   // mounts; the player fires them on the main thread via `mediaPlayer.EventListener`.
@@ -45,22 +53,19 @@ class PlayerSession(
   private var currentMedia: Media? = null
   private var isAttached = false
   private var isInPiP = false
+  private var contentFit = "contain"
 
   init {
     surfaceView.holder.addCallback(object : SurfaceHolder.Callback {
       override fun surfaceCreated(holder: SurfaceHolder) {
-        val vout = mediaPlayer.getVLCVout()
-        vout.setVideoView(surfaceView)
-        if (!isAttached) {
-          vout.attachViews()
-          isAttached = true
-        }
-        mediaPlayer.play()
+        Log.i(TAG, "surfaceCreated id=$id")
+        attachSurfaceIfReady()
       }
 
       override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
 
       override fun surfaceDestroyed(holder: SurfaceHolder) {
+        Log.i(TAG, "surfaceDestroyed id=$id")
         val vout = mediaPlayer.getVLCVout()
         if (vout.areViewsAttached()) {
           vout.detachViews()
@@ -71,25 +76,37 @@ class PlayerSession(
 
     mediaPlayer.setEventListener { event ->
       when (event.type) {
-        MediaPlayer.Event.Playing -> onPlaying?.invoke(mapOf("duration" to durationSeconds()))
+        MediaPlayer.Event.Playing -> {
+          Log.i(
+            TAG,
+            "event Playing id=$id length=${mediaPlayer.getLength()} videoTracks=${mediaPlayer.getVideoTracksCount()} audioTracks=${mediaPlayer.getAudioTracksCount()}"
+          )
+          onPlaying?.invoke(mapOf("duration" to durationSeconds()))
+        }
         MediaPlayer.Event.Paused -> onPaused?.invoke(emptyMap())
         MediaPlayer.Event.Stopped -> onEnded?.invoke()
         MediaPlayer.Event.EndReached -> onEnded?.invoke()
-        MediaPlayer.Event.EncounteredError -> onError?.invoke(
-          mapOf(
-            "message" to "libVLC error",
-            "code" to "VLC_ERROR",
-            "domain" to "libVLC"
+        MediaPlayer.Event.EncounteredError -> {
+          Log.e(TAG, "event EncounteredError id=$id")
+          onError?.invoke(
+            mapOf(
+              "message" to "libVLC error",
+              "code" to "VLC_ERROR",
+              "domain" to "libVLC"
+            )
           )
-        )
+        }
         MediaPlayer.Event.Buffering -> onBuffering?.invoke(mapOf("isBuffering" to (event.getBuffering() < 100.0f)))
-        MediaPlayer.Event.Opening -> onLoad?.invoke(
-          mapOf(
-            "duration" to durationSeconds(),
-            "audioTracks" to emptyList<Map<String, Any>>(),
-            "textTracks" to emptyList<Map<String, Any>>()
+        MediaPlayer.Event.Opening -> {
+          Log.i(TAG, "event Opening id=$id")
+          onLoad?.invoke(
+            mapOf(
+              "duration" to durationSeconds(),
+              "audioTracks" to emptyList<Map<String, Any>>(),
+              "textTracks" to emptyList<Map<String, Any>>()
+            )
           )
-        )
+        }
         MediaPlayer.Event.TimeChanged -> onProgress?.invoke(
           mapOf(
             "currentTime" to (event.getTimeChanged() / 1000.0),
@@ -102,11 +119,66 @@ class PlayerSession(
   }
 
   fun replace(uri: String) {
+    Log.i(TAG, "replace id=$id scheme=${Uri.parse(uri).scheme} host=${Uri.parse(uri).host}")
     currentMedia?.release()
     val media = Media(libVlc, Uri.parse(uri))
+    // IPTV HTTP/TS feeds are sensitive to short network jitter. Keep a
+    // bounded live buffer and allow the HTTP access module to reconnect
+    // without rebuilding the native player session.
+    media.addOption(":network-caching=3000")
+    media.addOption(":live-caching=3000")
+    media.addOption(":http-reconnect=true")
     currentMedia = media
     mediaPlayer.media = media
     mediaPlayer.play()
+  }
+
+  fun setContentFit(value: String) {
+    contentFit = value
+    mediaPlayer.setVideoScale(
+      when (value) {
+        "cover" -> MediaPlayer.ScaleType.SURFACE_FILL
+        "fill" -> MediaPlayer.ScaleType.SURFACE_FIT_SCREEN
+        else -> MediaPlayer.ScaleType.SURFACE_BEST_FIT
+      }
+    )
+  }
+
+  fun updateVideoLayout(width: Int, height: Int) {
+    if (width <= 0 || height <= 0) return
+    val vout = mediaPlayer.getVLCVout()
+    if (vout.areViewsAttached()) {
+      vout.setWindowSize(width, height)
+    }
+    if (surfaceView.holder.surface.isValid) {
+      surfaceView.holder.setFixedSize(width, height)
+    }
+  }
+
+  /**
+   * Attaches the actual Android surface when it is available.
+   *
+   * SurfaceView callbacks can be delivered before or after the Fabric view
+   * is adopted into the hierarchy, so callers also invoke this after adding
+   * the child view. Keeping this operation idempotent prevents repeated VLC
+   * output recreation during layout passes.
+   */
+  fun attachSurfaceIfReady() {
+    val holder = surfaceView.holder
+    if (!holder.surface.isValid || isAttached) {
+      updateVideoLayout(surfaceView.width, surfaceView.height)
+      return
+    }
+
+    val vout = mediaPlayer.getVLCVout()
+    // Bind the holder's actual Surface directly. This avoids the LibVLC
+    // window bridge path, which can fail under Expo/Fabric with
+    // "request 1 not implemented" and leave audio playing over a black
+    // video surface.
+    vout.setVideoSurface(holder.surface, holder)
+    vout.attachViews()
+    isAttached = true
+    updateVideoLayout(surfaceView.width, surfaceView.height)
   }
 
   private fun durationSeconds(): Double = mediaPlayer.getLength() / 1000.0
@@ -174,4 +246,5 @@ class PlayerSession(
     currentMedia?.release()
     libVlc.release()
   }
+
 }

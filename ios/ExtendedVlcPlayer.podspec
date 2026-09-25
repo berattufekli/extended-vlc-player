@@ -21,11 +21,18 @@ Pod::Spec.new do |s|
   s.dependency 'ExpoModulesCore'
   s.dependency 'MobileVLCKit', '~> 3.7.0'
 
-  s.source_files = '**/*.{h,m,mm,swift}'
+  # The view is implemented as an ExpoView. Keeping this pod Swift-only on
+  # Apple avoids the legacy Obj-C++ Fabric bridge and lets Expo 57 register
+  # the view through the same View(...) definition as Android.
+  s.source_files = '**/*.swift'
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',
     'CLANG_CXX_LIBRARY' => 'libc++',
+    # React Native 0.86's prebuilt React headers keep Yoga's C++ headers
+    # one directory below the public React-Core-prebuilt include root.
+    # Fabric's RCTViewComponentView.h includes them as <yoga/...>.
+    'HEADER_SEARCH_PATHS' => '$(inherited) "$(PODS_ROOT)/Headers/Public/React-Core-prebuilt/Yoga"',
     'SWIFT_OBJC_INTERFACE_HEADER_NAME' => 'ExtendedVlcPlayer-Swift.h',
     'OTHER_SWIFT_FLAGS' => '$(inherited) -D COCOAPODS -Xfrontend -module-name -Xfrontend ExtendedVlcPlayer',
     # The host app's Podfile already enables use_frameworks! :linkage => :static

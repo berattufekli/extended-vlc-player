@@ -1,4 +1,5 @@
 import AVFoundation
+import AVKit
 import ExpoModulesCore
 import Foundation
 import MobileVLCKit
@@ -14,6 +15,30 @@ import MobileVLCKit
 public final class ExtendedVlcPlayerModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ExtendedVlcPlayer")
+
+    View(ExtendedVlcPlayerView.self) {
+      ViewName("ExtendedVlcPlayerView")
+      Events(
+        "onLoad",
+        "onProgress",
+        "onPlaying",
+        "onPaused",
+        "onEnded",
+        "onError",
+        "onBuffering",
+        "onPictureInPictureStart",
+        "onPictureInPictureStop"
+      )
+      Prop("player") { (view: ExtendedVlcPlayerView, id: Int) in
+        view.setPlayer(id)
+      }
+      Prop("contentFit") { (view: ExtendedVlcPlayerView, fit: String) in
+        view.setContentFit(fit)
+      }
+      Prop("aspectRatio") { (view: ExtendedVlcPlayerView, ratio: String?) in
+        view.setAspectRatio(ratio)
+      }
+    }
 
     OnCreate {
       AudioSessionConfigurator.configureForPlayback()
@@ -96,11 +121,12 @@ public final class ExtendedVlcPlayerModule: Module {
 struct ReplacePayload: Record {
   @Field var uri: String = ""
   @Field var headers: [String: String]?
-  @Field var drm: Any?
   @Field var instanceId: Int = 0
 }
 
-struct InvalidSourceException: Exception {}
+final class InvalidSourceException: Exception, @unchecked Sendable {
+  override var reason: String { "A non-empty media source URI is required." }
+}
 
 /// Registry is shared between this module and the Obj-C++ Fabric view
 /// (via `PlayerRegistryBridge`). The lock is held briefly to keep the

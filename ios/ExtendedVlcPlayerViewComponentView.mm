@@ -1,8 +1,13 @@
 #import "ExtendedVlcPlayerViewComponentView.h"
-#import "ExtendedVlcPlayer-Swift.h"
+// The Swift compatibility header is emitted into the pod framework's Headers
+// directory for static framework pods. Import it through the module so this
+// mixed Obj-C++ translation unit works with both CocoaPods and Xcode builds.
+#import <ExtendedVlcPlayer/ExtendedVlcPlayer-Swift.h>
 
 #import <React/RCTConversions.h>
+#import <React/RCTComponent.h>
 #import <React/RCTLog.h>
+#import <React/RCTViewManager.h>
 
 @interface ExtendedVlcPlayerViewComponentView () <ExtendedVlcPlayerViewEventReceiver>
 @property (nonatomic, strong) NSNumber *playerId;
@@ -121,7 +126,7 @@ RCT_EXPORT_VIEW_PROPERTY(onPictureInPictureStop, RCTBubblingEventBlock)
 
 #pragma mark - ExtendedVlcPlayerViewEventReceiver
 
-- (void)exvlcEmit:(NSString *)name payload:(NSDictionary *)payload
+- (void)exvlcEmit:(NSString *)name :(NSDictionary *)payload
 {
   NSDictionary *p = payload ?: @{};
   if ([name isEqualToString:@"onLoad"] && self.onLoadBlock) { self.onLoadBlock(p); return; }

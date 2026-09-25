@@ -40,6 +40,7 @@ class ExtendedVlcPlayerViewComponentView(context: Context, appContext: AppContex
 
   fun setContentFit(value: String) {
     contentFit = value
+    PlayerRegistry.session(playerId)?.setContentFit(value)
   }
 
   private fun attachToSession() {
@@ -53,6 +54,8 @@ class ExtendedVlcPlayerViewComponentView(context: Context, appContext: AppContex
     )
     this.addView(drawable)
     PlayerRegistry.attachView(this, id)
+    session.setContentFit(contentFit)
+    post { session.attachSurfaceIfReady() }
     // Wire event sinks to forward to the JS dispatcher.
     session.onLoad = { payload -> onLoad(payload) }
     session.onProgress = { payload -> onProgress(payload) }
@@ -89,5 +92,11 @@ class ExtendedVlcPlayerViewComponentView(context: Context, appContext: AppContex
   override fun onAttachedToWindow() {
     super.onAttachedToWindow()
     attachToSession()
+    post { PlayerRegistry.session(playerId)?.attachSurfaceIfReady() }
+  }
+
+  override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
+    super.onSizeChanged(width, height, oldWidth, oldHeight)
+    PlayerRegistry.session(playerId)?.updateVideoLayout(width, height)
   }
 }

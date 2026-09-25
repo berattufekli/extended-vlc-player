@@ -30,11 +30,11 @@ function getModule() {
 }
 
 function normalizeSource(source: ExtendedVlcSource) {
-  if (typeof source === 'string') return { uri: source };
-  const { uri } = source;
-  if (!uri) {
+  const uri = typeof source === 'string' ? source : source?.uri;
+  if (typeof uri !== 'string' || uri.trim().length === 0) {
     throw new Error('[extended-vlc-player] source.uri is required');
   }
+  if (typeof source === 'string') return { uri };
   return { uri, headers: source.headers ?? null, drm: source.drm ?? null };
 }
 
@@ -52,7 +52,21 @@ export function useExtendedVlcPlayer(
   source: ExtendedVlcSource,
   options: UseExtendedVlcPlayerOptions = {}
 ): ExtendedVlcPlayer {
-  const normalized = useMemo(() => normalizeSource(source), [source]);
+  // Player screens often rebuild the source object while their controls and
+  // metadata update. Replacing the native media for every new object resets
+  // the decoder before a live stream can render its first frame. Only treat
+  // actual source details as a media change.
+  const sourceUri = typeof source === 'string' ? source : source?.uri;
+  const sourceHeaders = typeof source === 'object' && source !== null
+    ? source.headers
+    : undefined;
+  const sourceDrm = typeof source === 'object' && source !== null
+    ? source.drm
+    : undefined;
+  const normalized = useMemo(
+    () => normalizeSource(source),
+    [sourceUri, sourceHeaders, sourceDrm],
+  );
   // We hold a numeric id of the "current native source" so we can detect
   // when the JS source prop has changed and tell the native module to swap.
   const [nativeId, setNativeId] = useState(0);
@@ -72,21 +86,46 @@ export function useExtendedVlcPlayer(
 
   useEffect(() => {
     let createdId = 0;
+    let cancelled = false;
+
     try {
-      createdId = getModule().createPlayer();
-      setNativeId(createdId);
+      // PlayerSession creates an Android SurfaceView and a libVLC instance,
+      // so the native module schedules creation on the Android main queue.
+      // Keep the hook tolerant of either a Promise (new native module) or a
+      // synchronous mock (tests and older integrations).
+      Promise.resolve(getModule().createPlayer())
+        .then((id: number) => {
+          if (cancelled) {
+            try {
+              getModule().destroyPlayer(id);
+            } catch (error) {
+              // eslint-disable-next-line no-console
+              console.warn('[extended-vlc-player] late player cleanup failed:', error);
+            }
+            return;
+          }
+
+          createdId = id;
+          setNativeId(id);
+        })
+        .catch((error) => {
+          // eslint-disable-next-line no-console
+          console.warn('[extended-vlc-player] player creation failed:', error);
+        });
     } catch (error) {
       // eslint-disable-next-line no-console
       console.warn('[extended-vlc-player] player creation failed:', error);
     }
 
     return () => {
-      if (createdId <= 0) return;
-      try {
-        getModule().destroyPlayer(createdId);
-      } catch (error) {
-        // eslint-disable-next-line no-console
-        console.warn('[extended-vlc-player] player cleanup failed:', error);
+      cancelled = true;
+      if (createdId > 0) {
+        try {
+          getModule().destroyPlayer(createdId);
+        } catch (error) {
+          // eslint-disable-next-line no-console
+          console.warn('[extended-vlc-player] player cleanup failed:', error);
+        }
       }
     };
   }, []);
@@ -97,14 +136,17 @@ export function useExtendedVlcPlayer(
     // delegate wiring, etc.).
     if (nativeId <= 0) return;
     try {
-      getModule().replace(nativeId, normalized);
+      Promise.resolve(getModule().replace(nativeId, normalized)).catch((error) => {
+        // Surface as console error; the player view will also emit onError
+        // once the Fabric event dispatcher picks it up.
+        // eslint-disable-next-line no-console
+        console.warn('[extended-vlc-player] replace failed:', error);
+      });
     } catch (error) {
-      // Surface as console error; the player view will also emit onError
-      // once the Fabric event dispatcher picks it up.
       // eslint-disable-next-line no-console
       console.warn('[extended-vlc-player] replace failed:', error);
     }
-  }, [nativeId, normalized]);
+  }, [nativeId, normalized.uri, normalized.headers, normalized.drm]);
 
   // The player object is intentionally stable across renders. Methods are
   // closures over `nativeId` so the latest normalized source is always
@@ -124,7 +166,10 @@ export function useExtendedVlcPlayer(
       replace: (next: ExtendedVlcSource) => {
         const nextNormalized = normalizeSource(next);
         try {
-          getModule().replace(nativeId, nextNormalized);
+          Promise.resolve(getModule().replace(nativeId, nextNormalized)).catch((error) => {
+            // eslint-disable-next-line no-console
+            console.warn('[extended-vlc-player] replace failed:', error);
+          });
         } catch (error) {
           // eslint-disable-next-line no-console
           console.warn('[extended-vlc-player] replace failed:', error);

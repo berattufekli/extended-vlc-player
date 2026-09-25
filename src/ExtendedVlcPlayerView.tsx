@@ -4,7 +4,8 @@ import { Platform, type ViewStyle } from 'react-native';
 
 import type { ExtendedVlcPlayerViewProps } from './types';
 
-const NativeView = requireNativeViewManager('ExtendedVlcPlayerView');
+// Match the Swift view class name, just like Expo's native view modules do.
+const NativeView = requireNativeViewManager('ExtendedVlcPlayer', 'ExtendedVlcPlayerView');
 
 /**
  * Drop-in replacement for `expo-video`'s `VideoView`. Renders the VLC-backed
@@ -16,6 +17,7 @@ export const ExtendedVlcPlayerView = React.forwardRef<unknown, ExtendedVlcPlayer
       player,
       style,
       contentFit = 'contain',
+      aspectRatio,
       onLoad,
       onProgress,
       onPlaying,
@@ -38,6 +40,7 @@ export const ExtendedVlcPlayerView = React.forwardRef<unknown, ExtendedVlcPlayer
         style={style as ViewStyle}
         player={nativeId}
         contentFit={contentFit}
+        aspectRatio={aspectRatio}
         // Standard Fabric "bubbling event" props. They are passed as
         // RCTBubblingEventBlock on the native side; the Swift
         // PlayerSession fires the corresponding closures which the

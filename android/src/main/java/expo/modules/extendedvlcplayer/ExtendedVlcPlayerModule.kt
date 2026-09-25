@@ -4,8 +4,10 @@ import android.app.Activity
 import android.app.PictureInPictureParams
 import android.os.Build
 import android.util.Rational
+import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import expo.modules.kotlin.records.Field
 import expo.modules.kotlin.records.Record
 
 /**
@@ -21,15 +23,15 @@ class ExtendedVlcPlayerModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("ExtendedVlcPlayer")
 
-    Function("createPlayer") {
+    AsyncFunction("createPlayer") {
       val context = appContext.reactContext
         ?: throw IllegalStateException("React context is not available")
       PlayerRegistry.create(context).first
-    }
+    }.runOnQueue(Queues.MAIN)
 
-    Function("destroyPlayer") { instanceId: Int ->
+    AsyncFunction("destroyPlayer") { instanceId: Int ->
       PlayerRegistry.destroy(instanceId)
-    }
+    }.runOnQueue(Queues.MAIN)
 
     View(ExtendedVlcPlayerViewComponentView::class) {
       Name("ExtendedVlcPlayerView")
@@ -97,10 +99,12 @@ class ExtendedVlcPlayerModule : Module() {
 
     AsyncFunction("replace") { instanceId: Int, payload: ReplacePayload ->
       val session = PlayerRegistry.session(instanceId) ?: return@AsyncFunction
-      val url = if (payload.uri.startsWith("http://") || payload.uri.startsWith("https://") || payload.uri.startsWith("file://")) {
-        payload.uri
+      val uri = payload.uri.trim()
+      if (uri.isEmpty()) return@AsyncFunction
+      val url = if (uri.startsWith("http://") || uri.startsWith("https://") || uri.startsWith("file://")) {
+        uri
       } else {
-        "https://${payload.uri}"
+        "https://$uri"
       }
       session.replace(url)
     }
@@ -121,9 +125,12 @@ class ExtendedVlcPlayerModule : Module() {
       return@AsyncFunction true
     }
   }
+
 }
 
 class ReplacePayload(
-  val uri: String,
-  val instanceId: Int = 0
+  @Field val uri: String = "",
+  @Field val headers: Map<String, String>? = null,
+  @Field val drm: Any? = null,
+  @Field val instanceId: Int = 0
 ) : Record
