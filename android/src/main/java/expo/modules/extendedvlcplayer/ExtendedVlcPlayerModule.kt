@@ -1,9 +1,6 @@
 package expo.modules.extendedvlcplayer
 
-import android.app.Activity
-import android.app.PictureInPictureParams
 import android.os.Build
-import android.util.Rational
 import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -53,6 +50,9 @@ class ExtendedVlcPlayerModule : Module() {
       Prop("contentFit") { view: ExtendedVlcPlayerViewComponentView, fit: String ->
         view.setContentFit(fit)
       }
+      Prop("startsPictureInPictureAutomatically") { view: ExtendedVlcPlayerViewComponentView, enabled: Boolean ->
+        view.setAutoEnterPiP(enabled)
+      }
     }
 
     AsyncFunction("isPictureInPictureSupported") {
@@ -60,6 +60,14 @@ class ExtendedVlcPlayerModule : Module() {
         appContext.currentActivity?.application?.packageManager?.hasSystemFeature(
           android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE
         ) == true
+    }
+
+    // Android < 12 has no auto-enter flag, so entering PiP on home / gesture
+    // navigation has to happen from onUserLeaveHint. On 12+ the activity's
+    // PictureInPictureParams (auto-enter) handle it without a flash.
+    OnUserLeavesActivity {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) return@OnUserLeavesActivity
+      PlayerRegistry.autoPiPCandidate()?.enterPiP()
     }
 
     AsyncFunction("isPictureInPictureActive") { instanceId: Int ->
@@ -111,20 +119,16 @@ class ExtendedVlcPlayerModule : Module() {
     }
 
     AsyncFunction("startPictureInPicture") { instanceId: Int ->
-      val activity = appContext.currentActivity ?: return@AsyncFunction false
       val session = PlayerRegistry.session(instanceId) ?: return@AsyncFunction false
-      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return@AsyncFunction false
-      val params = PictureInPictureParams.Builder()
-        .setAspectRatio(Rational(16, 9))
-        .build()
-      return@AsyncFunction activity.enterPictureInPictureMode(params)
-    }
+      session.activityProvider = session.activityProvider ?: { appContext.currentActivity }
+      return@AsyncFunction session.enterPiP()
+    }.runOnQueue(Queues.MAIN)
 
     AsyncFunction("stopPictureInPicture") { instanceId: Int ->
       val session = PlayerRegistry.session(instanceId) ?: return@AsyncFunction false
       session.requestExitPiP()
       return@AsyncFunction true
-    }
+    }.runOnQueue(Queues.MAIN)
   }
 
 }

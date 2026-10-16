@@ -5,6 +5,7 @@ import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -56,6 +57,25 @@ class PlayerSession(
   private var currentMedia: Media? = null
   private var isAttached = false
   private var isInPiP = false
+  // Natural video aspect ratio (SAR applied), reported by libVLC's vout.
+  private var videoRatio: Rational? = null
+  private val videoLayoutListener = IVLCVout.OnNewVideoLayoutListener { _, _, _, visibleWidth, visibleHeight, sarNum, sarDen ->
+    if (visibleWidth > 0 && visibleHeight > 0) {
+      val w = if (sarNum > 0 && sarDen > 0) visibleWidth.toLong() * sarNum / sarDen else visibleWidth.toLong()
+      videoRatio = Rational(w.toInt().coerceAtLeast(1), visibleHeight)
+      mainHandler.post { updatePiPParams() }
+    }
+  }
+  // Resolved by the view that currently hosts this session; PlayerRegistry's
+  // `currentActivity` is only a fallback.
+  var activityProvider: (() -> Activity?)? = null
+  // Mirrors the `startsPictureInPictureAutomatically` prop. Auto-entering
+  // is only armed while the host view is mounted and the stream is playing.
+  var autoEnterPiP = false
+    set(value) {
+      field = value
+      updatePiPParams(force = true)
+    }
   private var contentFit = "contain"
   private val mainHandler = Handler(Looper.getMainLooper())
   private var durationSecondsCache = 0.0
@@ -120,10 +140,14 @@ class PlayerSession(
           applyPendingSeekIfReady()
           emitDurationLoadIfReady()
           emitTracksIfChanged()
+          updatePiPParams()
           onPlaying?.invoke(mapOf("duration" to durationSecondsCache))
           if (durationSecondsCache > 0) emitProgress() else scheduleDurationPolling()
         }
-        MediaPlayer.Event.Paused -> onPaused?.invoke(emptyMap())
+        MediaPlayer.Event.Paused -> {
+          updatePiPParams()
+          onPaused?.invoke(emptyMap())
+        }
         MediaPlayer.Event.Stopped -> onEnded?.invoke()
         MediaPlayer.Event.EndReached -> onEnded?.invoke()
         MediaPlayer.Event.EncounteredError -> {
@@ -154,9 +178,13 @@ class PlayerSession(
           verifySeekIfNeeded(mediaPlayer.time / 1000.0)
           emitProgress()
         }
+        MediaPlayer.Event.Vout -> updatePiPParams()
         MediaPlayer.Event.ESAdded,
         MediaPlayer.Event.ESDeleted,
-        MediaPlayer.Event.ESSelected -> emitTracksIfChanged()
+        MediaPlayer.Event.ESSelected -> {
+          emitTracksIfChanged()
+          updatePiPParams()
+        }
       }
     }
   }
@@ -172,6 +200,7 @@ class PlayerSession(
     media.addOption(":live-caching=3000")
     media.addOption(":http-reconnect=true")
     currentMedia = media
+    videoRatio = null
     mainHandler.removeCallbacks(durationPollRunnable)
     durationSecondsCache = 0.0
     durationPollAttempts = 0
@@ -187,6 +216,10 @@ class PlayerSession(
 
   fun setContentFit(value: String) {
     contentFit = value
+    applyVideoScale(if (isInPiP) "contain" else value)
+  }
+
+  private fun applyVideoScale(value: String) {
     mediaPlayer.setVideoScale(
       when (value) {
         "cover" -> MediaPlayer.ScaleType.SURFACE_FILL
@@ -228,7 +261,7 @@ class PlayerSession(
     // "request 1 not implemented" and leave audio playing over a black
     // video surface.
     vout.setVideoSurface(holder.surface, holder)
-    vout.attachViews()
+    vout.attachViews(videoLayoutListener)
     isAttached = true
     updateVideoLayout(surfaceView.width, surfaceView.height)
   }
@@ -381,19 +414,98 @@ class PlayerSession(
 
   fun isInPiP(): Boolean = isInPiP
 
+  private fun hostActivity(): Activity? = activityProvider?.invoke() ?: PlayerRegistry.currentActivity
+
+  fun isPiPSupported(): Boolean =
+    Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+      context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+  /** True when leaving the app (home / gesture navigation) should open PiP. */
+  fun shouldAutoEnterPiP(): Boolean =
+    autoEnterPiP && !isInPiP && surfaceView.isAttachedToWindow && mediaPlayer.isPlaying
+
+  /** Video aspect ratio, clamped to what the system accepts for PiP. */
+  private fun pipAspectRatio(): Rational {
+    // Never derive this from the surface: the surface follows the (possibly
+    // stretched / zoomed) screen layout, not the picture.
+    val ratio = videoRatio ?: return Rational(16, 9)
+    val value = ratio.toDouble()
+    return when {
+      value > 2.39 -> Rational(239, 100)
+      value < 1.0 / 2.39 -> Rational(100, 239)
+      else -> ratio
+    }
+  }
+
+  private fun buildPiPParams(autoEnter: Boolean): PictureInPictureParams {
+    val builder = PictureInPictureParams.Builder().setAspectRatio(pipAspectRatio())
+    // Lets the system animate from the video rectangle instead of the whole
+    // activity, so the transition shows the picture and not the controls.
+    val rect = Rect()
+    if (surfaceView.getGlobalVisibleRect(rect) && !rect.isEmpty) builder.setSourceRectHint(rect)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) builder.setAutoEnterEnabled(autoEnter)
+    return builder.build()
+  }
+
+  /**
+   * Pushes aspect ratio / auto-enter state to the activity. Event-driven
+   * callers are ignored unless this session owns PiP, so an unrelated
+   * session can't overwrite the params; `force` is for ownership changes.
+   */
+  fun updatePiPParams(force: Boolean = false) {
+    if (!force && !autoEnterPiP && !isInPiP) return
+    if (!isPiPSupported()) return
+    val activity = hostActivity() ?: return
+    try {
+      activity.setPictureInPictureParams(buildPiPParams(shouldAutoEnterPiP()))
+    } catch (error: Throwable) {
+      Log.w(TAG, "setPictureInPictureParams failed: ${error.message}")
+    }
+  }
+
+  fun enterPiP(): Boolean {
+    if (!isPiPSupported()) return false
+    val activity = hostActivity() ?: return false
+    if (isInPiP || activity.isInPictureInPictureMode) return true
+    return try {
+      activity.enterPictureInPictureMode(buildPiPParams(false))
+    } catch (error: Throwable) {
+      Log.w(TAG, "enterPictureInPictureMode failed: ${error.message}")
+      false
+    }
+  }
+
   fun setInPiP(value: Boolean) {
+    Log.i(TAG, "setInPiP id=$id value=$value was=$isInPiP")
+    if (isInPiP == value) return
     isInPiP = value
-    if (value) onPictureInPictureStart?.invoke() else onPictureInPictureStop?.invoke()
+    // The PiP window always shows the whole picture; the screen's zoom /
+    // stretch modes would crop it in a window this small.
+    applyVideoScale(if (value) "contain" else contentFit)
+    if (value) {
+      onPictureInPictureStart?.invoke()
+      return
+    }
+    onPictureInPictureStop?.invoke()
+    updatePiPParams()
+    // Closing the PiP window (X) leaves the activity stopped, whereas
+    // expanding it back leaves it started. A dismissed window must not
+    // keep streaming invisibly.
+    mainHandler.postDelayed({
+      val owner = hostActivity() as? androidx.lifecycle.LifecycleOwner ?: return@postDelayed
+      if (!isInPiP && !owner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+        mediaPlayer.pause()
+      }
+    }, 300L)
   }
 
   fun requestExitPiP() {
-    val activity = PlayerRegistry.currentActivity ?: return
+    val activity = hostActivity() ?: return
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity.isInPictureInPictureMode) {
-      val params = PictureInPictureParams.Builder()
-        .setAspectRatio(Rational(16, 9))
-        .build()
-      activity.setPictureInPictureParams(params)
-      activity.moveTaskToBack(false)
+      // Bring the task back to the foreground (expands the PiP window).
+      val intent = context.packageManager.getLaunchIntentForPackage(context.packageName) ?: return
+      intent.addFlags(android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
+      activity.startActivity(intent)
     }
   }
 

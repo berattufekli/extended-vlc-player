@@ -43,5 +43,10 @@ object PlayerRegistry {
     sessionIdsByView.remove(view)
   }
 
+  /** The mounted, playing session that asked to enter PiP automatically. */
+  @Synchronized
+  fun autoPiPCandidate(): PlayerSession? =
+    sessions.values.firstOrNull { it.shouldAutoEnterPiP() }
+
   fun session(id: Int): PlayerSession? = get(id)
 }
