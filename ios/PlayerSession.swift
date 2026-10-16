@@ -105,6 +105,7 @@ final class PlayerSession: NSObject {
 
   /// Tears the session down; called when JS releases the player.
   func destroy() {
+    NSLog("[EXVLCDBG] TMP session=%d destroy surface=%p superview=%p", id, unsafeBitCast(surface, to: Int.self), surface.superview.map { unsafeBitCast($0, to: Int.self) } ?? 0)
     isDestroyed = true
     frameSink.invalidate()
     clearEventSinks()
@@ -195,6 +196,7 @@ final class PlayerSession: NSObject {
   }
 
   func replace(media: VLCMedia) {
+    NSLog("[EXVLCDBG] TMP session=%d replace", id)
     durationSeconds = 0
     didEmitLoad = false
     didEmitLoadWithDuration = false
@@ -217,7 +219,14 @@ final class PlayerSession: NSObject {
 
   // MARK: - Frames
 
+  private var dbgFrames = 0
   private func enqueue(_ pixelBuffer: CVPixelBuffer) {
+    dbgFrames += 1
+    if dbgFrames % 60 == 1 {
+      let st = displayLayer.status.rawValue
+      let err = displayLayer.error.map { "\($0)" } ?? "-"
+      NSLog("[EXVLCDBG] TMP session=%d frame#%d %dx%d layerStatus=%d flush=%d err=%@ layerFrame=%@ super=%d", id, dbgFrames, CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer), st, displayLayer.requiresFlushToResumeDecoding ? 1 : 0, err, NSCoder.string(for: displayLayer.frame), displayLayer.superlayer == nil ? 0 : 1)
+    }
     let width = CVPixelBufferGetWidth(pixelBuffer)
     let height = CVPixelBufferGetHeight(pixelBuffer)
     if let format = frameFormat,

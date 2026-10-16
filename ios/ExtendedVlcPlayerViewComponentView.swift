@@ -30,6 +30,7 @@ public final class ExtendedVlcPlayerView: ExpoView {
   }
 
   func setPlayer(_ id: Int) {
+    NSLog("[EXVLCDBG] TMP view=%p setPlayer old=%d new=%d window=%d subviews=%d", unsafeBitCast(self, to: Int.self), playerId, id, window == nil ? 0 : 1, subviews.count)
     guard playerId != id else {
       attachSessionIfPossible()
       return
@@ -57,6 +58,7 @@ public final class ExtendedVlcPlayerView: ExpoView {
 
   public override func didMoveToWindow() {
     super.didMoveToWindow()
+    NSLog("[EXVLCDBG] TMP view=%p didMoveToWindow window=%d player=%d", unsafeBitCast(self, to: Int.self), window == nil ? 0 : 1, playerId)
     if window == nil {
       detachSession()
     } else {
@@ -76,6 +78,7 @@ public final class ExtendedVlcPlayerView: ExpoView {
           let session = PlayerRegistry.shared.session(for: playerId) else { return }
 
     let surface = session.surface
+    NSLog("[EXVLCDBG] TMP view=%p attach player=%d surface=%p superview=%p bounds=%@", unsafeBitCast(self, to: Int.self), playerId, unsafeBitCast(surface, to: Int.self), surface.superview.map { unsafeBitCast($0, to: Int.self) } ?? 0, NSCoder.string(for: bounds))
     if surface.superview !== self {
       surface.frame = bounds
       surface.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -107,6 +110,7 @@ public final class ExtendedVlcPlayerView: ExpoView {
     if session.isPictureInPictureActive() {
       return
     }
+    NSLog("[EXVLCDBG] TMP view=%p detach player=%d surfaceInSelf=%d", unsafeBitCast(self, to: Int.self), playerId, session.surface.superview === self ? 1 : 0)
     if session.surface.superview === self {
       session.surface.removeFromSuperview()
     }

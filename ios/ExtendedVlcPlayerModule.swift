@@ -167,6 +167,7 @@ final class PlayerRegistry {
     nextId += 1
     let id = nextId
     sessions[id] = PlayerSession(id: id)
+    NSLog("[EXVLCDBG] TMP registry create %d main=%d", id, Thread.isMainThread ? 1 : 0)
     return id
   }
 
@@ -180,6 +181,7 @@ final class PlayerRegistry {
     lock.lock()
     let session = sessions.removeValue(forKey: id)
     lock.unlock()
+    NSLog("[EXVLCDBG] TMP registry remove %d found=%d", id, session == nil ? 0 : 1)
     guard let session else { return }
     DispatchQueue.main.async {
       session.destroy()
